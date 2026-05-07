@@ -1,0 +1,4 @@
+aiogram>=3.11
+requests>=2.32
+pytz>=2025.2
+python-dotenv>=1.0
