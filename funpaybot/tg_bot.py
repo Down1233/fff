@@ -19,6 +19,7 @@ from .scheduler import AutoBumpScheduler
 
 STATE_PATH = Path(__file__).resolve().parents[1] / "data" / "runtime_state.json"
 CONFIG_PATH = Path(__file__).resolve().parents[1] / "config.json"
+PANEL_VERSION = "2026-05-07.2"
 
 
 async def run_telegram_bot(
@@ -733,6 +734,13 @@ def _build_router(
         await callback.message.answer(_hero_menu_text(config, hero_sms), reply_markup=_hero_keyboard())
         await callback.answer()
 
+    @router.callback_query(F.data == "hero_menu")
+    async def legacy_hero_menu_callback(callback: CallbackQuery) -> None:
+        if not await require_auth_callback(callback):
+            return
+        await callback.message.answer(_hero_menu_text(config, hero_sms), reply_markup=_hero_keyboard())
+        await callback.answer()
+
     @router.callback_query(F.data == "menu_auto")
     async def menu_auto_callback(callback: CallbackQuery) -> None:
         if not await require_auth_callback(callback):
@@ -1001,6 +1009,7 @@ def _dashboard_text(
     return "\n".join(
         [
             "FunPayBot — главное меню",
+            f"Версия панели: {PANEL_VERSION}",
             "",
             "Состояние:",
             f"FunPay: {funpay_status}",
