@@ -54,7 +54,7 @@ async def main() -> None:
             max_concurrent_orders=config.orders.max_concurrent,
             cooldown_seconds=config.orders.cooldown_seconds,
             max_orders_per_day=config.orders.max_per_day,
-            hero_rate_per_minute=config.orders.hero_rate_per_minute,
+            max_hero_requests_per_minute=config.orders.hero_rate_per_minute,
             max_remind_count=config.orders.max_remind_count,
             remind_interval_seconds=config.orders.remind_interval_seconds,
             confirm_timeout_seconds=config.orders.confirm_timeout_seconds,
