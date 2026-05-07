@@ -129,6 +129,17 @@ def load_config(path: Path) -> AppConfig:
     if load_dotenv:
         load_dotenv(path.parent / ".env")
 
+    # Если config.json не существует — создаём из примера
+    if not path.exists():
+        example = path.parent / "config.example.json"
+        if example.exists():
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(example.read_text(encoding="utf-8"), encoding="utf-8")
+        else:
+            # Нет даже примера — создаём минимальный конфиг
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(_minimal_config(), ensure_ascii=False, indent=2), encoding="utf-8")
+
     with path.open("r", encoding="utf-8") as file:
         raw = json.load(file)
 
@@ -236,6 +247,67 @@ def _parse_countries(raw: Any) -> dict[int, str]:
                     except (ValueError, TypeError):
                         continue
     return result if result else {43: "🇩🇪 Германия", 16: "🇬🇧 Великобритания"}
+
+
+def _minimal_config() -> dict[str, Any]:
+    """Минимальный конфиг, если нет ни config.json, ни config.example.json."""
+    return {
+        "telegram": {"token": "", "password": "change_me", "admin_ids": [], "proxy": ""},
+        "funpay": {
+            "golden_key": "",
+            "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            "proxy": "",
+            "requests_timeout": 30,
+            "category_ids": ["3172"],
+            "lot_urls": [],
+        },
+        "hero_sms": {
+            "api_key": "",
+            "default_country": 43,
+            "default_service": "cl",
+            "max_price": 0,
+            "poll_interval": 5.0,
+            "wait_timeout": 300,
+            "proxy": "",
+        },
+        "orders": {
+            "max_concurrent": 3,
+            "cooldown_seconds": 30,
+            "max_per_day": 50,
+            "hero_rate_per_minute": 12,
+            "max_remind_count": 3,
+            "remind_interval_seconds": 120,
+            "confirm_timeout_seconds": 600,
+            "countries": {"43": "🇩🇪 Германия", "16": "🇬🇧 Великобритания"},
+        },
+        "auto_bump": {
+            "enabled": True,
+            "interval_seconds": 3900,
+            "jitter_seconds": 420,
+            "quiet_hours": {"enabled": False, "start": "03:00", "end": "08:00", "timezone": "Europe/Moscow"},
+        },
+        "service": {
+            "name": "Claude.ai - верификация номера",
+            "brand": "FunPayBot",
+            "delivery_note": "SMS-код в чат FunPay",
+            "support_note": "Помощь с подтверждением номера",
+            "tiers": [
+                {
+                    "id": "de_basic",
+                    "title": "🇩🇪 Claude.ai | Верификация Германия | SMS-код",
+                    "price": 80,
+                    "old_price": 120,
+                    "quality": "DE Basic",
+                    "badge": "Дешево",
+                    "warranty": "На момент ввода кода",
+                    "description": "Базовая верификация немецкого номера для Claude.ai.",
+                    "funpay_category_id": "3172",
+                    "delivery_format": "1 SMS-код (Германия)",
+                    "hero_sms_country_id": 43,
+                }
+            ],
+        },
+    }
 
 
 def _validate_config(config: AppConfig) -> None:
