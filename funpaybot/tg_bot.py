@@ -159,7 +159,10 @@ def _build_router(
     async def start(message: Message) -> None:
         user_id = message.from_user.id if message.from_user else 0
         if _is_allowed(user_id, authorized, config):
-            await message.answer("FunPayBot готов. Выбирай действие:", reply_markup=_main_keyboard())
+            await message.answer(
+                _dashboard_text(config, client, scheduler, hero_sms, auto_verifier, order_mgr),
+                reply_markup=_main_keyboard(),
+            )
             return
         # Если конфиг пустой — предлагаем мастер настройки
         needs_setup = (
@@ -180,9 +183,7 @@ def _build_router(
     async def status(message: Message) -> None:
         if not await require_auth(message):
             return
-        text = scheduler.status_text()
-        if auto_verifier:
-            text += "\n\n" + auto_verifier.status_text()
+        text = _dashboard_text(config, client, scheduler, hero_sms, auto_verifier, order_mgr)
         await message.answer(text, reply_markup=_main_keyboard())
 
     @router.message(Command("catalog"))
@@ -281,26 +282,19 @@ def _build_router(
         if active:
             await message.answer(
                 f"У тебя уже есть активный заказ: {active[0]}\nЗаверши или отмени его сначала.",
-                reply_markup=_order_keyboard(active[0].id),
+                reply_markup=_order_keyboard(order_mgr, active[0].id),
             )
             return
         await message.answer(
             "Клиент купил товар. Выбери страну для верификации:",
-            reply_markup=_country_keyboard(),
+            reply_markup=_country_keyboard(config),
         )
 
     @router.message(Command("orders"))
     async def list_orders(message: Message) -> None:
         if not await require_auth(message):
             return
-        active = order_mgr.active_orders
-        if not active:
-            await message.answer("Нет активных заказов.", reply_markup=_main_keyboard())
-            return
-        lines = ["Активные заказы:"]
-        for o in active:
-            lines.append(f"  {o} | Код: {o.sms_code or '—'} | Номер: +{o.hero_number or '—'}")
-        await message.answer("\n".join(lines), reply_markup=_main_keyboard())
+        await message.answer(_orders_list_text(order_mgr), reply_markup=_orders_keyboard())
 
     @router.message(Command("hero_balance"))
     async def hero_balance(message: Message) -> None:
@@ -314,7 +308,7 @@ def _build_router(
         except HeroSmsError as exc:
             await message.answer(f"Ошибка: {exc}")
             return
-        await message.answer(f"Баланс Hero SMS: {balance}", reply_markup=_main_keyboard())
+        await message.answer(f"Баланс Hero SMS: {balance}", reply_markup=_hero_keyboard())
 
     # ── Мастер настройки ────────────────────────────────────
 
@@ -472,11 +466,11 @@ def _build_router(
         if active:
             await callback.message.answer(
                 f"Уже есть активный заказ: {active[0]}",
-                reply_markup=_order_keyboard(active[0].id),
+                reply_markup=_order_keyboard(order_mgr, active[0].id),
             )
             await callback.answer()
             return
-        await callback.message.answer("Выбери страну для верификации:", reply_markup=_country_keyboard())
+        await callback.message.answer("Выбери страну для верификации:", reply_markup=_country_keyboard(config))
         await callback.answer()
 
     @router.callback_query(F.data.startswith("order_country:"))
@@ -501,7 +495,7 @@ def _build_router(
             f"Заказ #{order.id} создан ({country_name}).\n\n"
             "Шаг 1: Попроси клиента открыть Claude.ai и начать авторизацию.\n"
             "Шаг 2: Когда клиент дойдёт до этапа верификации номера — нажми кнопку ниже.",
-            reply_markup=_order_keyboard(order.id),
+            reply_markup=_order_keyboard(order_mgr, order.id),
         )
         await callback.answer()
 
@@ -563,7 +557,7 @@ def _build_router(
             f"Страна: {order.country_name}\n\n"
             f"Отправь этот номер клиенту в чат FunPay.\n"
             f"Код придёт автоматически — бот сразу его пришлёт.",
-            reply_markup=_order_keyboard(order.id),
+            reply_markup=_order_keyboard(order_mgr, order.id),
         )
         await callback.answer()
 
@@ -590,7 +584,7 @@ def _build_router(
                 f"Код уже получен: {order.sms_code}\n"
                 f"Номер: +{order.hero_number}\n\n"
                 f"Отправь код клиенту и подтверди заказ на FunPay.",
-                reply_markup=_order_keyboard(order.id),
+                reply_markup=_order_keyboard(order_mgr, order.id),
             )
             await callback.answer()
             return
@@ -617,13 +611,13 @@ def _build_router(
             await callback.message.answer(
                 f"Код: {result.code}\nПолный текст: {result.full_text}\nНомер: +{order.hero_number}\n\n"
                 f"Отправь код клиенту и подтверди заказ на FunPay!",
-                reply_markup=_order_keyboard(order.id),
+                reply_markup=_order_keyboard(order_mgr, order.id),
             )
         else:
             status_map = {"waiting": "Ожидание SMS...", "wait_retry": "Ожидание повторного кода..."}
             await callback.message.answer(
                 f"{status_map.get(str(result), f'Статус: {result}')}\nНомер: +{order.hero_number}",
-                reply_markup=_order_keyboard(order.id),
+                reply_markup=_order_keyboard(order_mgr, order.id),
             )
         await callback.answer()
 
@@ -689,16 +683,68 @@ def _build_router(
             await callback.message.answer(f"Ошибка: {exc}")
             await callback.answer()
             return
-        await callback.message.answer(f"Баланс Hero SMS: {balance}", reply_markup=_main_keyboard())
+        await callback.message.answer(f"Баланс Hero SMS: {balance}", reply_markup=_hero_keyboard())
+        await callback.answer()
+
+    @router.callback_query(F.data == "menu_main")
+    async def menu_main_callback(callback: CallbackQuery) -> None:
+        if not await require_auth_callback(callback):
+            return
+        user_id = callback.from_user.id if callback.from_user else 0
+        pending_inputs.pop(user_id, None)
+        await callback.message.answer(
+            _dashboard_text(config, client, scheduler, hero_sms, auto_verifier, order_mgr),
+            reply_markup=_main_keyboard(),
+        )
+        await callback.answer()
+
+    @router.callback_query(F.data == "menu_funpay")
+    async def menu_funpay_callback(callback: CallbackQuery) -> None:
+        if not await require_auth_callback(callback):
+            return
+        await callback.message.answer(_funpay_menu_text(config, client, scheduler), reply_markup=_funpay_keyboard())
+        await callback.answer()
+
+    @router.callback_query(F.data == "menu_publish")
+    async def menu_publish_callback(callback: CallbackQuery) -> None:
+        if not await require_auth_callback(callback):
+            return
+        await callback.message.answer(_publish_menu_text(config), reply_markup=_publish_keyboard())
+        await callback.answer()
+
+    @router.callback_query(F.data == "menu_orders")
+    async def menu_orders_callback(callback: CallbackQuery) -> None:
+        if not await require_auth_callback(callback):
+            return
+        await callback.message.answer(_orders_menu_text(order_mgr, auto_verifier), reply_markup=_orders_keyboard())
+        await callback.answer()
+
+    @router.callback_query(F.data == "orders_list")
+    async def orders_list_callback(callback: CallbackQuery) -> None:
+        if not await require_auth_callback(callback):
+            return
+        await callback.message.answer(_orders_list_text(order_mgr), reply_markup=_orders_keyboard())
+        await callback.answer()
+
+    @router.callback_query(F.data == "menu_hero")
+    async def menu_hero_callback(callback: CallbackQuery) -> None:
+        if not await require_auth_callback(callback):
+            return
+        await callback.message.answer(_hero_menu_text(config, hero_sms), reply_markup=_hero_keyboard())
+        await callback.answer()
+
+    @router.callback_query(F.data == "menu_auto")
+    async def menu_auto_callback(callback: CallbackQuery) -> None:
+        if not await require_auth_callback(callback):
+            return
+        await callback.message.answer(_auto_menu_text(scheduler, auto_verifier), reply_markup=_auto_keyboard())
         await callback.answer()
 
     @router.callback_query(F.data == "status")
     async def status_callback(callback: CallbackQuery) -> None:
         if not await require_auth_callback(callback):
             return
-        text = scheduler.status_text()
-        if auto_verifier:
-            text += "\n\n" + auto_verifier.status_text()
+        text = _dashboard_text(config, client, scheduler, hero_sms, auto_verifier, order_mgr)
         await callback.message.answer(text, reply_markup=_main_keyboard())
         await callback.answer()
 
@@ -749,10 +795,10 @@ def _build_router(
         try:
             results = await client.create_all_offers(config)
         except Exception as exc:
-            await callback.message.answer(f"Ошибка при публикации: {exc}", reply_markup=_main_keyboard())
+            await callback.message.answer(f"Ошибка при публикации: {exc}", reply_markup=_publish_keyboard())
             await callback.answer()
             return
-        await callback.message.answer(_format_offer_results(results), reply_markup=_main_keyboard())
+        await callback.message.answer(_format_offer_results(results), reply_markup=_publish_keyboard())
         await callback.answer("Готово")
 
     @router.callback_query(F.data == "check_session")
@@ -763,7 +809,7 @@ def _build_router(
             result = await client.check_session()
         except Exception as exc:
             result = f"Ошибка проверки: {exc}"
-        await callback.message.answer(result, reply_markup=_main_keyboard())
+        await callback.message.answer(result, reply_markup=_funpay_keyboard())
         await callback.answer()
 
     @router.callback_query(F.data == "bump_now")
@@ -781,7 +827,7 @@ def _build_router(
         if not await require_auth_callback(callback):
             return
         results = await scheduler.bump_now()
-        await callback.message.answer(_format_results(results), reply_markup=_main_keyboard())
+        await callback.message.answer(_format_results(results), reply_markup=_funpay_keyboard())
         await callback.answer("Готово")
 
     @router.callback_query(F.data == "autobump_on")
@@ -789,7 +835,7 @@ def _build_router(
         if not await require_auth_callback(callback):
             return
         scheduler.set_enabled(True)
-        await callback.message.answer("Авто-поднятие включено в текущем запуске.", reply_markup=_main_keyboard())
+        await callback.message.answer("Авто-поднятие включено в текущем запуске.", reply_markup=_auto_keyboard())
         await callback.answer()
 
     @router.callback_query(F.data == "autobump_off")
@@ -797,7 +843,7 @@ def _build_router(
         if not await require_auth_callback(callback):
             return
         scheduler.set_enabled(False)
-        await callback.message.answer("Авто-поднятие выключено в текущем запуске.", reply_markup=_main_keyboard())
+        await callback.message.answer("Авто-поднятие выключено в текущем запуске.", reply_markup=_auto_keyboard())
         await callback.answer()
 
     @router.callback_query(F.data == "verify_on")
@@ -809,7 +855,7 @@ def _build_router(
             await callback.answer()
             return
         auto_verifier.set_enabled(True)
-        await callback.message.answer("Авто-верификация включена. Заказы обрабатываются автоматически.", reply_markup=_main_keyboard())
+        await callback.message.answer("Авто-верификация включена. Заказы обрабатываются автоматически.", reply_markup=_auto_keyboard())
         await callback.answer()
 
     @router.callback_query(F.data == "verify_off")
@@ -821,7 +867,7 @@ def _build_router(
             await callback.answer()
             return
         auto_verifier.set_enabled(False)
-        await callback.message.answer("Авто-верификация выключена.", reply_markup=_main_keyboard())
+        await callback.message.answer("Авто-верификация выключена.", reply_markup=_auto_keyboard())
         await callback.answer()
 
     @router.callback_query(F.data == "settings")
@@ -889,12 +935,18 @@ def _build_router(
                     result = f"Не получилось сохранить: {exc}"
                 await message.answer(result, reply_markup=_settings_keyboard())
                 return
-            await message.answer("Меню:", reply_markup=_main_keyboard())
+            await message.answer(
+                _dashboard_text(config, client, scheduler, hero_sms, auto_verifier, order_mgr),
+                reply_markup=_main_keyboard(),
+            )
             return
         if text == config.telegram.password:
             authorized.add(user_id)
             _save_authorized_users(authorized)
-            await message.answer("Доступ открыт. FunPayBot готов.", reply_markup=_main_keyboard())
+            await message.answer(
+                "Доступ открыт.\n\n" + _dashboard_text(config, client, scheduler, hero_sms, auto_verifier, order_mgr),
+                reply_markup=_main_keyboard(),
+            )
             return
         await message.answer("Пароль неверный.")
 
@@ -933,36 +985,205 @@ def _save_authorized_users(users: set[int]) -> None:
     )
 
 
+def _dashboard_text(
+    config: AppConfig,
+    client: FunPayClient,
+    scheduler: AutoBumpScheduler,
+    hero_sms: HeroSmsClient | None,
+    auto_verifier: AutoVerifier | None,
+    order_mgr: OrderManager,
+) -> str:
+    funpay_status = "готов" if client.can_write else "нужен golden_key"
+    hero_status = "подключен" if hero_sms else "не настроен"
+    verify_status = "включена" if auto_verifier and auto_verifier.is_enabled else "выключена" if auto_verifier else "не настроена"
+    active_orders = len(order_mgr.active_orders)
+    next_bump = scheduler.next_run_at.isoformat(sep=" ", timespec="minutes") if scheduler.next_run_at else "не запланирован"
+    return "\n".join(
+        [
+            "FunPayBot — главное меню",
+            "",
+            "Состояние:",
+            f"FunPay: {funpay_status}",
+            f"Hero SMS: {hero_status}",
+            f"Авто-поднятие: {'включено' if scheduler.enabled else 'выключено'}",
+            f"Авто-верификация: {verify_status}",
+            f"Активные заказы: {active_orders}",
+            f"Следующее поднятие: {next_bump}",
+            "",
+            "Выбери раздел ниже.",
+        ]
+    )
+
+
+def _funpay_menu_text(config: AppConfig, client: FunPayClient, scheduler: AutoBumpScheduler) -> str:
+    return "\n".join(
+        [
+            "Раздел FunPay",
+            "",
+            f"Сессия: {'golden_key задан' if client.can_write else 'golden_key не задан'}",
+            f"Категории: {', '.join(config.funpay.category_ids) or 'не заданы'}",
+            f"Авто-поднятие: {'включено' if scheduler.enabled else 'выключено'}",
+            "",
+            "Действия: проверить сессию, поднять предложения, перейти к публикации.",
+        ]
+    )
+
+
+def _publish_menu_text(config: AppConfig) -> str:
+    return "\n".join(
+        [
+            "Раздел публикации",
+            "",
+            f"Товаров в витрине: {len(config.service.tiers)}",
+            f"Категории: {', '.join(config.funpay.category_ids) or 'не заданы'}",
+            "",
+            "Сначала открой план/превью. Затем пробуй публикацию.",
+            "Если FunPay не подтвердит создание, бот покажет ERR с причиной.",
+        ]
+    )
+
+
+def _orders_menu_text(order_mgr: OrderManager, auto_verifier: AutoVerifier | None) -> str:
+    active = order_mgr.active_orders
+    lines = [
+        "Раздел заказов",
+        "",
+        f"Активных заказов: {len(active)}",
+        f"Авто-верификация: {'включена' if auto_verifier and auto_verifier.is_enabled else 'выключена' if auto_verifier else 'не настроена'}",
+    ]
+    if active:
+        lines.append("")
+        lines.append("Активные:")
+        for order in active[:10]:
+            lines.append(f"{order.id}. {order.country_name} — {order.state.value}")
+    return "\n".join(lines)
+
+
+def _orders_list_text(order_mgr: OrderManager) -> str:
+    active = order_mgr.active_orders
+    if not active:
+        return "Активных заказов сейчас нет."
+    lines = ["Активные заказы:"]
+    for order in active:
+        lines.append(
+            f"{order.id}. {order.country_name} — {order.state.value}\n"
+            f"Номер: +{order.hero_number or '—'} | Код: {order.sms_code or '—'}"
+        )
+    return "\n\n".join(lines)
+
+
+def _hero_menu_text(config: AppConfig, hero_sms: HeroSmsClient | None) -> str:
+    return "\n".join(
+        [
+            "Раздел Hero SMS",
+            "",
+            f"Статус: {'подключен' if hero_sms else 'не настроен'}",
+            f"Сервис: {config.hero_sms.default_service}",
+            f"Страна: {config.hero_sms.default_country}",
+            "",
+            "Здесь можно проверить баланс и создать ручной заказ.",
+        ]
+    )
+
+
+def _auto_menu_text(scheduler: AutoBumpScheduler, auto_verifier: AutoVerifier | None) -> str:
+    return "\n\n".join(
+        [
+            "Раздел автоматизации",
+            scheduler.status_text(),
+            auto_verifier.status_text() if auto_verifier else "Авто-верификация не настроена: нужен FunPay golden_key и Hero SMS api_key.",
+        ]
+    )
+
+
 def _main_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
-                InlineKeyboardButton(text="Статус", callback_data="status"),
-                InlineKeyboardButton(text="Каталог", callback_data="catalog"),
+                InlineKeyboardButton(text="FunPay", callback_data="menu_funpay"),
+                InlineKeyboardButton(text="Публикация", callback_data="menu_publish"),
             ],
             [
-                InlineKeyboardButton(text="Превью текста", callback_data="preview"),
-                InlineKeyboardButton(text="Проверить FunPay", callback_data="check_session"),
+                InlineKeyboardButton(text="Заказы", callback_data="menu_orders"),
+                InlineKeyboardButton(text="Hero SMS", callback_data="menu_hero"),
+            ],
+            [
+                InlineKeyboardButton(text="Автоматизация", callback_data="menu_auto"),
+                InlineKeyboardButton(text="Настройки", callback_data="settings"),
+            ],
+            [
+                InlineKeyboardButton(text="Обновить статус", callback_data="status"),
+            ],
+        ]
+    )
+
+
+def _back_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[[InlineKeyboardButton(text="Главное меню", callback_data="menu_main")]]
+    )
+
+
+def _funpay_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="Проверить сессию", callback_data="check_session"),
+                InlineKeyboardButton(text="Поднять сейчас", callback_data="bump_now"),
+            ],
+            [
+                InlineKeyboardButton(text="Публикация", callback_data="menu_publish"),
+                InlineKeyboardButton(text="Настройки FunPay", callback_data="settings"),
+            ],
+            [InlineKeyboardButton(text="Главное меню", callback_data="menu_main")],
+        ]
+    )
+
+
+def _publish_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="Каталог товаров", callback_data="catalog"),
+                InlineKeyboardButton(text="Тексты лотов", callback_data="preview"),
             ],
             [
                 InlineKeyboardButton(text="План публикации", callback_data="publish_plan"),
                 InlineKeyboardButton(text="Опубликовать все", callback_data="publish_all"),
             ],
+            [InlineKeyboardButton(text="Главное меню", callback_data="menu_main")],
+        ]
+    )
+
+
+def _orders_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
             [
-                InlineKeyboardButton(text="Поднять сейчас", callback_data="bump_now"),
-            ],
-            [
-                InlineKeyboardButton(text="Авто ON", callback_data="autobump_on"),
-                InlineKeyboardButton(text="Авто OFF", callback_data="autobump_off"),
+                InlineKeyboardButton(text="Новый ручной заказ", callback_data="new_order"),
+                InlineKeyboardButton(text="Активные заказы", callback_data="orders_list"),
             ],
             [
                 InlineKeyboardButton(text="Верификация ON", callback_data="verify_on"),
                 InlineKeyboardButton(text="Верификация OFF", callback_data="verify_off"),
             ],
+            [InlineKeyboardButton(text="Главное меню", callback_data="menu_main")],
+        ]
+    )
+
+
+def _auto_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
             [
-                InlineKeyboardButton(text="Hero SMS", callback_data="hero_menu"),
-                InlineKeyboardButton(text="Настройки", callback_data="settings"),
+                InlineKeyboardButton(text="Авто-поднятие ON", callback_data="autobump_on"),
+                InlineKeyboardButton(text="Авто-поднятие OFF", callback_data="autobump_off"),
             ],
+            [
+                InlineKeyboardButton(text="Авто-верификация ON", callback_data="verify_on"),
+                InlineKeyboardButton(text="Авто-верификация OFF", callback_data="verify_off"),
+            ],
+            [InlineKeyboardButton(text="Главное меню", callback_data="menu_main")],
         ]
     )
 
@@ -970,6 +1191,9 @@ def _main_keyboard() -> InlineKeyboardMarkup:
 def _settings_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
+            [
+                InlineKeyboardButton(text="Мастер настройки", callback_data="setup_start"),
+            ],
             [
                 InlineKeyboardButton(text="FunPay golden_key", callback_data="set:funpay_golden_key"),
                 InlineKeyboardButton(text="User-Agent", callback_data="set:funpay_user_agent"),
@@ -995,7 +1219,7 @@ def _settings_keyboard() -> InlineKeyboardMarkup:
                 InlineKeyboardButton(text="Hero SMS proxy", callback_data="set:hero_sms_proxy"),
             ],
             [
-                InlineKeyboardButton(text="Назад", callback_data="cancel"),
+                InlineKeyboardButton(text="Главное меню", callback_data="menu_main"),
             ],
         ]
     )
@@ -1006,7 +1230,7 @@ def _confirm_keyboard(action: str) -> InlineKeyboardMarkup:
         inline_keyboard=[
             [
                 InlineKeyboardButton(text="Да, выполнить", callback_data=action),
-                InlineKeyboardButton(text="Отмена", callback_data="cancel"),
+                InlineKeyboardButton(text="Отмена", callback_data="menu_main"),
             ]
         ]
     )
@@ -1014,7 +1238,7 @@ def _confirm_keyboard(action: str) -> InlineKeyboardMarkup:
 
 def _cancel_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
-        inline_keyboard=[[InlineKeyboardButton(text="Отмена", callback_data="cancel")]]
+        inline_keyboard=[[InlineKeyboardButton(text="Отмена", callback_data="menu_main")]]
     )
 
 
@@ -1037,22 +1261,22 @@ def _hero_keyboard() -> InlineKeyboardMarkup:
                 InlineKeyboardButton(text="Новый заказ", callback_data="new_order"),
             ],
             [
-                InlineKeyboardButton(text="Мои заказы", callback_data="status"),
-                InlineKeyboardButton(text="Назад", callback_data="cancel"),
+                InlineKeyboardButton(text="Активные заказы", callback_data="orders_list"),
+                InlineKeyboardButton(text="Главное меню", callback_data="menu_main"),
             ],
         ]
     )
 
 
-def _country_keyboard() -> InlineKeyboardMarkup:
+def _country_keyboard(config: AppConfig) -> InlineKeyboardMarkup:
     buttons = []
     for cid, name in config.orders.countries.items():
         buttons.append([InlineKeyboardButton(text=name, callback_data=f"order_country:{cid}")])
-    buttons.append([InlineKeyboardButton(text="Отмена", callback_data="cancel")])
+    buttons.append([InlineKeyboardButton(text="Отмена", callback_data="menu_main")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
-def _order_keyboard(order_id: int) -> InlineKeyboardMarkup:
+def _order_keyboard(order_mgr: OrderManager, order_id: int) -> InlineKeyboardMarkup:
     order = order_mgr.get_order(order_id)
     if not order:
         return _main_keyboard()
@@ -1078,7 +1302,7 @@ def _order_keyboard(order_id: int) -> InlineKeyboardMarkup:
 
     rows.append([
         InlineKeyboardButton(text="Отменить заказ", callback_data=f"order_cancel:{order_id}"),
-        InlineKeyboardButton(text="Назад", callback_data="cancel"),
+        InlineKeyboardButton(text="Главное меню", callback_data="menu_main"),
     ])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -1092,13 +1316,45 @@ def _format_results(results: list[BumpResult]) -> str:
 
 
 def _format_offer_results(results: list[CreateOfferResult]) -> str:
-    lines = ["Результат публикации предложений:"]
-    for result in results:
-        marker = "OK" if result.ok else "ERR"
-        lines.append(f"{marker} {result.tier_id} ({result.category_id}): {result.message}")
     ok_count = sum(1 for r in results if r.ok)
-    lines.append(f"\nУспешно: {ok_count}/{len(results)}")
+    err_count = len(results) - ok_count
+    lines = [
+        "Публикация FunPay завершена",
+        "",
+        f"Создано: {ok_count}/{len(results)}",
+        f"Ошибок: {err_count}",
+        "",
+    ]
+    if ok_count:
+        lines.append("Успешно:")
+        for result in results:
+            if result.ok:
+                lines.append(f"OK {result.tier_id} — {result.message}")
+        lines.append("")
+    if err_count:
+        lines.append("Ошибки:")
+        for result in results:
+            if not result.ok:
+                lines.append(f"ERR {result.tier_id} ({result.category_id})")
+                lines.append(f"Причина: {result.message}")
+                hint = _publish_error_hint(result.message)
+                if hint:
+                    lines.append(f"Что сделать: {hint}")
+                lines.append("")
     return "\n".join(lines)
+
+
+def _publish_error_hint(message: str) -> str:
+    lower = message.lower()
+    if "страница входа" in lower or "golden_key" in lower or "сесси" in lower:
+        return "обнови FunPay golden_key в настройках и нажми «Проверить сессию»."
+    if "форм" in lower or "валидац" in lower or "другие поля" in lower:
+        return "FunPay требует поля, которых бот не знает. Нужен HAR-запрос создания лота из браузера без секретов."
+    if "частоту" in lower or "429" in lower:
+        return "подожди 10-20 минут и попробуй ещё раз."
+    if "права аккаунта" in lower:
+        return "проверь, что аккаунт FunPay может создавать предложения в этой категории."
+    return ""
 
 
 def _format_publish_plan(items: list[PublishPlanItem]) -> str:
