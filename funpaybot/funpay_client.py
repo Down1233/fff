@@ -491,6 +491,7 @@ class FunPayClient:
         self, category_id: str, tier_id: str, text: str, price: int,
     ) -> CreateOfferResult:
         import re as _re
+        from urllib.parse import urljoin
 
         trade_url = f"https://funpay.com/lots/{category_id}/trade"
 
@@ -503,34 +504,67 @@ class FunPayClient:
                 message=f"Не удалось загрузить страницу trade: {exc}",
             )
 
-        if page.status_code in {401, 403}:
+        if page.status_code in {401, 403} or "/account/login" in page.url:
             return CreateOfferResult(
                 category_id=category_id, tier_id=tier_id, ok=False,
-                message="FunPay не принял сессию. Проверь golden_key.",
+                message="FunPay не принял сессию. Проверь golden_key: открылась страница входа.",
             )
 
-        # CSRF-токен
-        csrf_token = ""
-        for pattern in (
-            r'name=["\']_token["\'][^>]*value=["\']([^"\']+)["\']',
-            r'value=["\']([^"\']+)["\'][^>]*name=["\']_token["\']',
-            r'name=["\']csrf[_-]?token["\'][^>]*value=["\']([^"\']+)["\']',
-        ):
-            m = _re.search(pattern, page.text)
-            if m:
-                csrf_token = m.group(1)
-                break
+        if "<form" not in page.text.lower():
+            return CreateOfferResult(
+                category_id=category_id, tier_id=tier_id, ok=False,
+                message="FunPay не отдал форму создания предложения. Проверь golden_key и права аккаунта.",
+            )
 
-        # Список серверов (subcategory) — берём первый
+        form_match = _re.search(r"<form\b(?P<attrs>[^>]*)>(?P<body>.*?)</form>", page.text, _re.I | _re.S)
+        form_attrs = form_match.group("attrs") if form_match else ""
+        form_body = form_match.group("body") if form_match else page.text
+        action_match = _re.search(r'action=["\']([^"\']+)["\']', form_attrs, _re.I)
+        post_url = urljoin(page.url, action_match.group(1)) if action_match else trade_url
+
+        # Собираем реальные поля формы, чтобы не слать совсем произвольный payload.
+        form_payload: dict[str, Any] = {}
+        for input_match in _re.finditer(r"<input\b([^>]*)>", form_body, _re.I | _re.S):
+            attrs = input_match.group(1)
+            name_match = _re.search(r'name=["\']([^"\']+)["\']', attrs, _re.I)
+            if not name_match:
+                continue
+            value_match = _re.search(r'value=["\']([^"\']*)["\']', attrs, _re.I)
+            form_payload[name_match.group(1)] = value_match.group(1) if value_match else ""
+        for select_match in _re.finditer(r"<select\b([^>]*)>(.*?)</select>", form_body, _re.I | _re.S):
+            attrs, body = select_match.group(1), select_match.group(2)
+            name_match = _re.search(r'name=["\']([^"\']+)["\']', attrs, _re.I)
+            if not name_match:
+                continue
+            selected = _re.search(r'<option\b[^>]*value=["\']([^"\']+)["\'][^>]*selected', body, _re.I)
+            first = _re.search(r'<option\b[^>]*value=["\']([^"\']+)["\']', body, _re.I)
+            value = selected.group(1) if selected else first.group(1) if first else ""
+            if value:
+                form_payload[name_match.group(1)] = value
+
+        textarea_names = [
+            m.group(1)
+            for m in _re.finditer(r"<textarea\b[^>]*name=[\"']([^\"']+)[\"']", form_body, _re.I)
+        ]
+        for name in textarea_names:
+            form_payload[name] = text
+
+        for key in list(form_payload):
+            low = key.lower()
+            if any(part in low for part in ("price", "cost", "amount")):
+                form_payload[key] = str(price)
+            if any(part in low for part in ("desc", "text", "summary", "details")):
+                form_payload[key] = text
+
         server_id = ""
-        server_match = _re.search(
-            r'<option[^>]*value=["\'](\d+)["\'][^>]*>', page.text,
-        )
+        server_match = _re.search(r'<option\b[^>]*value=["\'](\d+)["\']', form_body, _re.I)
         if server_match:
             server_id = server_match.group(1)
 
-        # 2. Пробуем создать предложение разными форматами payload
-        payloads: list[dict[str, Any]] = [
+        payloads: list[dict[str, Any]] = []
+        if form_payload:
+            payloads.append(form_payload)
+        payloads.extend([
             {
                 "node": category_id,
                 "text": text,
@@ -549,25 +583,29 @@ class FunPayClient:
                 "offer[node]": category_id,
                 **({"offer[server]": server_id} if server_id else {}),
             },
-        ]
+        ])
 
         for payload in payloads:
-            if csrf_token:
-                payload["_token"] = csrf_token
+            for token_name in ("_token", "csrf_token", "csrf"):
+                token = _extract_form_value(page.text, token_name)
+                if token and token_name not in payload:
+                    payload[token_name] = token
 
         headers = {
             "Referer": trade_url,
             "X-Requested-With": "XMLHttpRequest",
+            "Accept": "application/json, text/javascript, */*; q=0.01",
         }
 
         last_error = ""
         for payload in payloads:
             try:
                 response = self.session.post(
-                    trade_url,
+                    post_url,
                     data=payload,
                     headers=headers,
                     timeout=self.config.requests_timeout,
+                    allow_redirects=False,
                 )
             except requests.RequestException as exc:
                 last_error = str(exc)
@@ -587,19 +625,15 @@ class FunPayClient:
                 last_error = f"status={response.status_code}"
                 continue
 
-            try:
-                raw_json = response.json()
-            except ValueError:
-                raw_json = {"status_code": response.status_code, "text": response.text[:500]}
+            interpreted = _interpret_create_offer_response(response)
+            if interpreted is not None:
+                ok, message, raw = interpreted
+                return CreateOfferResult(category_id=category_id, tier_id=tier_id, ok=ok, message=message, raw=raw)
 
-            ok = response.status_code < 400 and not raw_json.get("error")
-            message = (
-                raw_json.get("msg") or raw_json.get("message")
-                or ("Предложение создано" if ok else "Неизвестная ошибка")
-            )
-            return CreateOfferResult(
-                category_id=category_id, tier_id=tier_id,
-                ok=ok, message=str(message), raw=raw_json,
+            last_error = (
+                f"FunPay не подтвердил создание: status={response.status_code}, "
+                f"content-type={response.headers.get('content-type', '-')}. "
+                f"Скорее всего вернулась страница формы/валидации, а не созданный лот."
             )
 
         return CreateOfferResult(
@@ -630,3 +664,69 @@ class FunPayClient:
             await asyncio.sleep(3.0)
 
         return results
+
+
+def _extract_form_value(html: str, name: str) -> str:
+    import re
+
+    patterns = (
+        rf'name=["\']{re.escape(name)}["\'][^>]*value=["\']([^"\']*)["\']',
+        rf'value=["\']([^"\']*)["\'][^>]*name=["\']{re.escape(name)}["\']',
+    )
+    for pattern in patterns:
+        match = re.search(pattern, html, re.I | re.S)
+        if match:
+            return match.group(1)
+    return ""
+
+
+def _interpret_create_offer_response(response: requests.Response) -> tuple[bool, str, Any] | None:
+    status = response.status_code
+    location = response.headers.get("Location", "")
+
+    if 300 <= status < 400:
+        if "/account/login" in location:
+            return False, "FunPay отправил на страницу входа. golden_key не рабочий или устарел.", {"location": location}
+        if "/trade" in location:
+            return False, "FunPay вернул обратно на форму создания. Предложение не подтверждено.", {"location": location}
+        return True, f"FunPay подтвердил создание редиректом: {location or 'redirect'}", {"location": location}
+
+    if status == 204:
+        return True, "FunPay вернул 204 No Content — запрос принят.", {"status_code": status}
+
+    try:
+        data = response.json()
+    except ValueError:
+        data = None
+
+    if isinstance(data, dict):
+        error = data.get("error") or data.get("errors")
+        message = str(data.get("msg") or data.get("message") or data.get("error") or data.get("errors") or "")
+        if error:
+            return False, f"FunPay вернул ошибку: {message or error}", data
+        status_value = str(data.get("status") or data.get("result") or "").lower()
+        if data.get("success") is True or status_value in {"ok", "success", "done"}:
+            return True, message or "FunPay JSON подтвердил создание.", data
+        if any(key in data for key in ("url", "redirect", "lot_id", "offer_id")):
+            return True, message or "FunPay JSON вернул данные созданного предложения.", data
+        if message:
+            positive = ("создан", "добавлен", "успеш")
+            if any(word in message.lower() for word in positive):
+                return True, message, data
+            return False, f"FunPay не подтвердил создание: {message}", data
+        return False, "FunPay вернул JSON без подтверждения создания.", data
+
+    text = response.text[:2000]
+    low = text.lower()
+    if "/account/login" in response.url or "name=\"login\"" in low and "password" in low:
+        return False, "FunPay вернул страницу входа. golden_key не рабочий или устарел.", {"status_code": status}
+    if any(marker in low for marker in ("alert-danger", "has-error", "form-error", "ошибка", "error")):
+        return False, f"FunPay вернул HTML с ошибкой/валидацией: {text[:250].strip()}", {"status_code": status}
+    if any(marker in low for marker in ("предложение создан", "лот создан", "успешно создан", "alert-success")):
+        return True, "FunPay HTML подтвердил создание предложения.", {"status_code": status}
+    if "<form" in low:
+        return False, (
+            "FunPay вернул страницу формы, а не подтверждение создания. "
+            "Предложение не создано или форма требует другие поля."
+        ), {"status_code": status}
+    return None
