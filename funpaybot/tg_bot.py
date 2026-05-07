@@ -71,6 +71,76 @@ def _build_router(
     pending_inputs: dict[int, str] = {}
     # Текущий активный заказ пользователя: user_id -> Order
     user_active_order: dict[int, Order] = {}
+    # Мастер настройки: user_id -> текущий шаг
+    setup_step: dict[int, int] = {}
+
+    # Шаги мастера настройки
+    SETUP_STEPS = [
+        {
+            "key": "telegram_password",
+            "title": "Шаг 1/6: Пароль бота",
+            "prompt": (
+                "Придумай пароль для входа в панель бота.\n"
+                "Минимум 4 символа. Этот пароль будешь вводить при /start.\n\n"
+                "Отправь пароль:"
+            ),
+        },
+        {
+            "key": "funpay_golden_key",
+            "title": "Шаг 2/6: FunPay golden_key",
+            "prompt": (
+                "Нужен cookie golden_key от авторизованного FunPay.\n"
+                "Как получить:\n"
+                "1. Открой funpay.com в браузере и войди в аккаунт\n"
+                "2. Нажми F12 → вкладка Application → Cookies\n"
+                "3. Скопируй значение cookie с именем golden_key\n\n"
+                "Отправь golden_key (или '-' чтобы пропустить):"
+            ),
+        },
+        {
+            "key": "funpay_category_ids",
+            "title": "Шаг 3/6: ID категории FunPay",
+            "prompt": (
+                "ID категории FunPay, в которой твои предложения.\n"
+                "Сейчас стоит: 3172 (Claude.ai)\n"
+                "Если подходит — отправь 3172\n"
+                "Если нужна другая — отправь ID (можно несколько через запятую)\n\n"
+                "Отправь ID категории:"
+            ),
+        },
+        {
+            "key": "hero_sms_api_key",
+            "title": "Шаг 4/6: Hero SMS API-ключ",
+            "prompt": (
+                "API-ключ от hero-sms.com для покупки виртуальных номеров.\n"
+                "Как получить:\n"
+                "1. Зарегистрируйся на hero-sms.com\n"
+                "2. Пополнить баланс\n"
+                "3. API-ключ в личном кабинете\n\n"
+                "Отправь API-ключ (или '-' чтобы пропустить):"
+            ),
+        },
+        {
+            "key": "hero_sms_country",
+            "title": "Шаг 5/6: Страна по умолчанию",
+            "prompt": (
+                "ID страны для виртуальных номеров:\n"
+                "• 43 — Германия 🇩🇪\n"
+                "• 16 — Великобритания 🇬🇧\n"
+                "• 0 — Россия 🇷🇺\n\n"
+                "Отправь ID страны (по умолчанию 43):"
+            ),
+        },
+        {
+            "key": "auto_bump_interval",
+            "title": "Шаг 6/6: Интервал автоподнятия",
+            "prompt": (
+                "Как часто бот будет поднимать предложения на FunPay.\n"
+                "Минимум 600 сек (10 мин). Рекомендую 3900 (65 мин).\n\n"
+                "Отправь интервал в секундах (или '-' чтобы оставить 3900):"
+            ),
+        },
+    ]
 
     async def require_auth(message: Message) -> bool:
         if _is_allowed(message.from_user.id if message.from_user else 0, authorized, config):
@@ -90,6 +160,19 @@ def _build_router(
         user_id = message.from_user.id if message.from_user else 0
         if _is_allowed(user_id, authorized, config):
             await message.answer("FunPayBot готов. Выбирай действие:", reply_markup=_main_keyboard())
+            return
+        # Если конфиг пустой — предлагаем мастер настройки
+        needs_setup = (
+            not config.telegram.password or config.telegram.password == "change_me"
+        )
+        if needs_setup:
+            await message.answer(
+                "Привет! FunPayBot ещё не настроен.\n\n"
+                "Нажми кнопку ниже, и я пошагово проведу тебя по всем настройкам прямо тут в чате.",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="Начать настройку", callback_data="setup_start")],
+                ]),
+            )
             return
         await message.answer("Привет. Отправь пароль для входа в FunPayBot.")
 
@@ -232,6 +315,131 @@ def _build_router(
             await message.answer(f"Ошибка: {exc}")
             return
         await message.answer(f"Баланс Hero SMS: {balance}", reply_markup=_main_keyboard())
+
+    # ── Мастер настройки ────────────────────────────────────
+
+    @router.message(Command("setup"))
+    async def setup_cmd(message: Message) -> None:
+        user_id = message.from_user.id if message.from_user else 0
+        setup_step[user_id] = 0
+        step = SETUP_STEPS[0]
+        await message.answer(
+            f"🔧 Мастер настройки FunPayBot\n\n{step['title']}\n\n{step['prompt']}",
+            reply_markup=_setup_keyboard(),
+        )
+
+    @router.callback_query(F.data == "setup_start")
+    async def setup_start_callback(callback: CallbackQuery) -> None:
+        user_id = callback.from_user.id if callback.from_user else 0
+        setup_step[user_id] = 0
+        # Автоматически авторизуем того, кто запускает настройку
+        authorized.add(user_id)
+        _save_authorized_users(authorized)
+        step = SETUP_STEPS[0]
+        await callback.message.answer(
+            f"🔧 Мастер настройки FunPayBot\n\n{step['title']}\n\n{step['prompt']}",
+            reply_markup=_setup_keyboard(),
+        )
+        await callback.answer()
+
+    @router.callback_query(F.data == "setup_skip")
+    async def setup_skip_callback(callback: CallbackQuery) -> None:
+        user_id = callback.from_user.id if callback.from_user else 0
+        step_idx = setup_step.get(user_id, -1)
+        if step_idx < 0 or step_idx >= len(SETUP_STEPS):
+            await callback.message.answer("Настройка завершена.", reply_markup=_main_keyboard())
+            await callback.answer()
+            return
+        step = SETUP_STEPS[step_idx]
+        await callback.message.answer(f"Пропущено: {step['title'].split(': ', 1)[-1]}")
+        # Переходим к следующему шагу
+        await _advance_setup(callback.message, user_id, step_idx + 1)
+        await callback.answer()
+
+    @router.callback_query(F.data == "setup_cancel")
+    async def setup_cancel_callback(callback: CallbackQuery) -> None:
+        user_id = callback.from_user.id if callback.from_user else 0
+        setup_step.pop(user_id, None)
+        await callback.message.answer("Настройка отменена.", reply_markup=_main_keyboard())
+        await callback.answer()
+
+    async def _advance_setup(message: Message, user_id: int, next_step: int) -> None:
+        if next_step >= len(SETUP_STEPS):
+            setup_step.pop(user_id, None)
+            await message.answer(
+                "✅ Настройка завершена!\n\n"
+                "Все данные сохранены в config.json. Бот готов к работе.\n\n"
+                "Что можно сделать дальше:\n"
+                "• /status — проверить состояние\n"
+                "• «Опубликовать все» — создать предложения на FunPay\n"
+                "• «Проверить FunPay» — проверить golden_key\n"
+                "• /settings — изменить настройки позже",
+                reply_markup=_main_keyboard(),
+            )
+            return
+        setup_step[user_id] = next_step
+        step = SETUP_STEPS[next_step]
+        await message.answer(
+            f"{step['title']}\n\n{step['prompt']}",
+            reply_markup=_setup_keyboard(),
+        )
+
+    def _apply_setup_step(setting_key: str, text: str) -> str:
+        """Применить значение шага настройки. Возвращает сообщение о результате."""
+        value = "" if text == "-" else text
+
+        if setting_key == "telegram_password":
+            if value and len(value) < 4:
+                raise ValueError("Пароль должен быть хотя бы 4 символа.")
+            if not value:
+                return "Пароль пропущен (оставлен текущий)."
+            _save_config_value(("telegram", "password"), value)
+            config.telegram.password = value
+            return "Пароль сохранен."
+
+        if setting_key == "funpay_golden_key":
+            if not value:
+                return "golden_key пропущен. Укажи позже через /settings."
+            _save_config_value(("funpay", "golden_key"), value)
+            config.funpay.golden_key = value
+            client.refresh_session()
+            return "FunPay golden_key сохранен."
+
+        if setting_key == "funpay_category_ids":
+            if not value:
+                return "Категория пропущена (оставлена 3172)."
+            values = _parse_list(text)
+            _save_config_value(("funpay", "category_ids"), values)
+            config.funpay.category_ids = values
+            return f"ID категорий сохранены: {', '.join(values)}"
+
+        if setting_key == "hero_sms_api_key":
+            if not value:
+                return "Hero SMS API-ключ пропущен. Укажи позже через /settings."
+            _save_config_value(("hero_sms", "api_key"), value)
+            config.hero_sms.api_key = value
+            return "Hero SMS API-ключ сохранен. Перезапусти бота для применения."
+
+        if setting_key == "hero_sms_country":
+            if not value:
+                value = "43"
+            country_id = int(value)
+            _save_config_value(("hero_sms", "default_country"), country_id)
+            config.hero_sms.default_country = country_id
+            return f"Страна сохранена: {country_id}"
+
+        if setting_key == "auto_bump_interval":
+            if not value:
+                return "Интервал оставлен по умолчанию (3900 сек)."
+            seconds = int(value)
+            if seconds < 600:
+                raise ValueError("Интервал должен быть минимум 600 секунд.")
+            _save_config_value(("auto_bump", "interval_seconds"), seconds)
+            config.auto_bump.interval_seconds = seconds
+            scheduler.next_run_at = None
+            return f"Интервал автоподнятия сохранен: {seconds} сек."
+
+        return "Сохранено."
 
     @router.message(Command("publish_all"))
     async def publish_all_cmd(message: Message) -> None:
@@ -658,6 +866,20 @@ def _build_router(
     async def password_or_menu(message: Message) -> None:
         user_id = message.from_user.id if message.from_user else 0
         text = (message.text or "").strip()
+
+        # Обработка шагов мастера настройки
+        step_idx = setup_step.get(user_id, -1)
+        if 0 <= step_idx < len(SETUP_STEPS):
+            step = SETUP_STEPS[step_idx]
+            try:
+                result = _apply_setup_step(step["key"], text)
+            except Exception as exc:
+                await message.answer(f"Ошибка: {exc}\n\nПопробуй ещё раз или нажми «Пропустить».", reply_markup=_setup_keyboard())
+                return
+            await message.answer(f"✅ {result}")
+            await _advance_setup(message, user_id, step_idx + 1)
+            return
+
         if _is_allowed(user_id, authorized, config):
             setting_key = pending_inputs.pop(user_id, "")
             if setting_key:
@@ -793,6 +1015,17 @@ def _confirm_keyboard(action: str) -> InlineKeyboardMarkup:
 def _cancel_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[[InlineKeyboardButton(text="Отмена", callback_data="cancel")]]
+    )
+
+
+def _setup_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="Пропустить", callback_data="setup_skip"),
+                InlineKeyboardButton(text="Отмена", callback_data="setup_cancel"),
+            ]
+        ]
     )
 
 
