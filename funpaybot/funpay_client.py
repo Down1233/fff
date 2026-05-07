@@ -39,6 +39,7 @@ class FunPayClient:
     def __init__(self, config: FunPayConfig) -> None:
         self.config = config
         self.session = requests.Session()
+        self._seen_order_ids: set[str] = set()
         self.refresh_session()
 
     def refresh_session(self) -> None:
@@ -60,11 +61,9 @@ class FunPayClient:
 
     @property
     def can_write(self) -> bool:
-        return not self.config.dry_run and self.config.marketplace_writes_enabled
+        return bool(self.config.golden_key)
 
     async def check_session(self) -> str:
-        if self.config.dry_run:
-            return "DRY-RUN: проверка FunPay пропущена, реальных запросов нет."
         if not self.config.golden_key:
             raise FunPayClientError("Не заполнен funpay.golden_key.")
 
@@ -98,20 +97,6 @@ class FunPayClient:
         category_id = str(category_id).strip()
         if not category_id:
             return BumpResult(category_id=category_id, ok=False, message="Пустой ID категории.")
-
-        if self.config.dry_run:
-            return BumpResult(
-                category_id=category_id,
-                ok=True,
-                message="DRY-RUN: бот сделал бы поднятие этой категории, но реальный запрос не отправлен.",
-            )
-
-        if not self.config.marketplace_writes_enabled:
-            return BumpResult(
-                category_id=category_id,
-                ok=False,
-                message="Реальные действия выключены: marketplace_writes_enabled=false.",
-            )
 
         if not self.config.golden_key:
             return BumpResult(category_id=category_id, ok=False, message="Не заполнен funpay.golden_key.")
@@ -228,3 +213,214 @@ class FunPayClient:
             ok=False,
             message=f"Не получилось отправить поднятие через HTTP. Последняя ошибка: {last_error}",
         )
+
+    # ── Заказы FunPay ──────────────────────────────────────
+
+    @dataclass(slots=True)
+    class FunPayOrder:
+        order_id: str
+        title: str
+        price: float
+        buyer_name: str
+        status: str
+        raw: Any = None
+
+        def __str__(self) -> str:
+            return f"#{self.order_id}: {self.title} ({self.price}₽) [{self.status}]"
+
+    async def get_new_orders(self) -> list[FunPayOrder]:
+        """Получить новые оплаченные заказы, которые ещё не обрабатывались."""
+        if not self.config.golden_key:
+            return []
+        orders = await asyncio.to_thread(self._fetch_orders_sync)
+        new_orders = [o for o in orders if o.order_id not in self._seen_order_ids]
+        for o in new_orders:
+            self._seen_order_ids.add(o.order_id)
+        return new_orders
+
+    def _fetch_orders_sync(self) -> list[FunPayOrder]:
+        """Получить список оплаченных заказов через FunPayAPI или HTTP."""
+        # Сначала пробуем FunPayAPI
+        api_orders = self._try_funpay_api_orders()
+        if api_orders is not None:
+            return api_orders
+        # Фолбэк на HTTP
+        return self._try_http_orders()
+
+    def _try_funpay_api_orders(self) -> list[FunPayOrder] | None:
+        try:
+            from FunPayAPI import Account  # type: ignore
+        except Exception:
+            return None
+
+        try:
+            account = Account(self.config.golden_key)
+            if hasattr(account, "get"):
+                account.get()
+
+            orders: list[FunPayClient.FunPayOrder] = []
+
+            # Пробуем разные методы получения заказов
+            for method_name in ("get_orders", "orders", "get_trades", "trades"):
+                method = getattr(account, method_name, None)
+                if method is None:
+                    continue
+                raw = method()
+                if raw is None:
+                    continue
+                items = raw if isinstance(raw, list) else []
+                for item in items:
+                    if not isinstance(item, dict):
+                        # Возможно это объект FunPayAPI
+                        oid = getattr(item, "id", None) or getattr(item, "order_id", None)
+                        if oid is None:
+                            continue
+                        title = getattr(item, "title", "") or getattr(item, "description", "") or ""
+                        price = getattr(item, "price", 0) or 0
+                        buyer = getattr(item, "buyer", "") or getattr(item, "buyer_name", "") or ""
+                        status = getattr(item, "status", "") or ""
+                        orders.append(FunPayClient.FunPayOrder(
+                            order_id=str(oid),
+                            title=str(title),
+                            price=float(price),
+                            buyer_name=str(buyer),
+                            status=str(status),
+                            raw=item,
+                        ))
+                    else:
+                        oid = item.get("id") or item.get("order_id") or item.get("orderId")
+                        if not oid:
+                            continue
+                        orders.append(FunPayClient.FunPayOrder(
+                            order_id=str(oid),
+                            title=str(item.get("title", item.get("description", ""))),
+                            price=float(item.get("price", item.get("amount", 0))),
+                            buyer_name=str(item.get("buyer", item.get("buyer_name", ""))),
+                            status=str(item.get("status", item.get("state", ""))),
+                            raw=item,
+                        ))
+                if orders:
+                    return orders
+        except Exception as exc:
+            log.warning("FunPayAPI orders failed: %s", exc)
+            return None
+
+        return None
+
+    def _try_http_orders(self) -> list[FunPayOrder]:
+        """Получить заказы через HTTP-запрос к странице аккаунта."""
+        orders: list[FunPayClient.FunPayOrder] = []
+        try:
+            response = self.session.get(
+                "https://funpay.com/account/trades",
+                timeout=self.config.requests_timeout,
+            )
+            if response.status_code >= 400:
+                log.warning("HTTP orders: status=%d", response.status_code)
+                return orders
+
+            # Парсим HTML/JSON ответ
+            text = response.text
+            try:
+                data = response.json()
+                # JSON формат
+                items = data if isinstance(data, list) else data.get("orders", data.get("trades", []))
+                for item in items:
+                    if not isinstance(item, dict):
+                        continue
+                    oid = item.get("id") or item.get("order_id")
+                    if not oid:
+                        continue
+                    orders.append(FunPayClient.FunPayOrder(
+                        order_id=str(oid),
+                        title=str(item.get("title", item.get("description", ""))),
+                        price=float(item.get("price", item.get("amount", 0))),
+                        buyer_name=str(item.get("buyer", item.get("buyer_name", ""))),
+                        status=str(item.get("status", item.get("state", ""))),
+                        raw=item,
+                    ))
+            except ValueError:
+                # HTML формат — простой парсинг
+                import re
+                # Ищем ID заказов и их статусы
+                order_pattern = re.compile(r'data-order[^"]*?(\d+)', re.IGNORECASE)
+                for match in order_pattern.finditer(text):
+                    oid = match.group(1)
+                    orders.append(FunPayClient.FunPayOrder(
+                        order_id=oid,
+                        title="",
+                        price=0,
+                        buyer_name="",
+                        status="paid",
+                        raw=None,
+                    ))
+        except Exception as exc:
+            log.warning("HTTP orders fetch failed: %s", exc)
+
+        return orders
+
+    async def send_chat_message(self, order_id: str, message: str) -> bool:
+        """Отправить сообщение в чат заказа FunPay."""
+        if not self.config.golden_key:
+            return False
+        return await asyncio.to_thread(self._send_chat_sync, order_id, message)
+
+    def _send_chat_sync(self, order_id: str, message: str) -> bool:
+        """Отправить сообщение через FunPayAPI или HTTP."""
+        # Сначала FunPayAPI
+        try:
+            from FunPayAPI import Account  # type: ignore
+            account = Account(self.config.golden_key)
+            if hasattr(account, "get"):
+                account.get()
+            for method_name in ("send_message", "chat_send", "message_send"):
+                method = getattr(account, method_name, None)
+                if method:
+                    method(order_id, message)
+                    return True
+        except Exception as exc:
+            log.debug("FunPayAPI chat send failed: %s", exc)
+
+        # HTTP фолбэк
+        try:
+            response = self.session.post(
+                f"https://funpay.com/account/trades/{order_id}/chat",
+                data={"message": message},
+                headers={"Referer": f"https://funpay.com/account/trades/{order_id}/"},
+                timeout=self.config.requests_timeout,
+            )
+            return response.status_code < 400
+        except Exception as exc:
+            log.warning("HTTP chat send failed: %s", exc)
+            return False
+
+    async def confirm_order(self, order_id: str) -> bool:
+        """Подтвердить выполнение заказа на FunPay."""
+        if not self.config.golden_key:
+            return False
+        return await asyncio.to_thread(self._confirm_order_sync, order_id)
+
+    def _confirm_order_sync(self, order_id: str) -> bool:
+        try:
+            from FunPayAPI import Account  # type: ignore
+            account = Account(self.config.golden_key)
+            if hasattr(account, "get"):
+                account.get()
+            for method_name in ("confirm_order", "complete_order", "finish_order"):
+                method = getattr(account, method_name, None)
+                if method:
+                    method(order_id)
+                    return True
+        except Exception as exc:
+            log.debug("FunPayAPI confirm failed: %s", exc)
+
+        try:
+            response = self.session.post(
+                f"https://funpay.com/account/trades/{order_id}/confirm",
+                headers={"Referer": f"https://funpay.com/account/trades/{order_id}/"},
+                timeout=self.config.requests_timeout,
+            )
+            return response.status_code < 400
+        except Exception as exc:
+            log.warning("HTTP confirm failed: %s", exc)
+            return False

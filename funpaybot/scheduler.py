@@ -39,11 +39,9 @@ class AutoBumpScheduler:
         self.enabled = enabled
 
     def status_text(self) -> str:
-        dry_mode = "DRY-RUN" if self.config.funpay.dry_run else "REAL"
         lines = [
-            f"Режим: {dry_mode}",
             f"Авто-поднятие: {'включено' if self.enabled else 'выключено'}",
-            f"Реальные действия: {'да' if self.client.can_write else 'нет'}",
+            f"FunPay golden_key: {'задан' if self.config.funpay.golden_key else 'не задан'}",
             f"Категории: {', '.join(self.config.funpay.category_ids) or 'не заданы'}",
             f"Интервал: {self.config.auto_bump.interval_seconds} сек.",
             f"Последний запуск: {self.last_run_at.isoformat(sep=' ', timespec='seconds') if self.last_run_at else 'еще не было'}",

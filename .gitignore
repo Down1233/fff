@@ -2,6 +2,7 @@
 __pycache__/
 *.pyc
 .env
+config.json
 config.local.json
 data/runtime_state.json
 logs/

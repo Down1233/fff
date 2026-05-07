@@ -8,9 +8,12 @@ from aiogram import Bot, Dispatcher, F, Router
 from aiogram.filters import Command
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
+from .auto_verify import AutoVerifier
 from .catalog import render_all_funpay_texts, render_catalog, write_listing_preview
 from .config import AppConfig
 from .funpay_client import BumpResult, FunPayClient, PublishPlanItem
+from .hero_sms import HeroSmsClient, HeroSmsError, NumberInfo, SmsCode
+from .orders import AbuseConfig, Order, OrderManager, OrderState
 from .scheduler import AutoBumpScheduler
 
 
@@ -22,20 +25,52 @@ async def run_telegram_bot(
     config: AppConfig,
     client: FunPayClient,
     scheduler: AutoBumpScheduler,
+    hero_sms: HeroSmsClient | None = None,
+    order_manager: OrderManager | None = None,
+    auto_verifier: AutoVerifier | None = None,
 ) -> None:
     if not config.telegram.token:
         raise RuntimeError("Заполни telegram.token в config.json или TELEGRAM_BOT_TOKEN в .env.")
 
+    if hero_sms is None and config.hero_sms.api_key:
+        hero_sms = HeroSmsClient(
+            api_key=config.hero_sms.api_key,
+            timeout=30,
+            proxy=config.hero_sms.proxy,
+        )
+
+    if order_manager is None:
+        order_manager = OrderManager(
+            abuse_config=AbuseConfig(
+                max_concurrent_orders=config.orders.max_concurrent,
+                cooldown_seconds=config.orders.cooldown_seconds,
+                max_orders_per_day=config.orders.max_per_day,
+                max_hero_requests_per_minute=config.orders.hero_rate_per_minute,
+                max_remind_count=config.orders.max_remind_count,
+                remind_interval_seconds=config.orders.remind_interval_seconds,
+                confirm_timeout_seconds=config.orders.confirm_timeout_seconds,
+            ),
+        )
+
     bot = Bot(token=config.telegram.token)
     dispatcher = Dispatcher()
-    dispatcher.include_router(_build_router(config, client, scheduler))
+    dispatcher.include_router(_build_router(config, client, scheduler, hero_sms, order_manager, auto_verifier))
     await dispatcher.start_polling(bot)
 
 
-def _build_router(config: AppConfig, client: FunPayClient, scheduler: AutoBumpScheduler) -> Router:
+def _build_router(
+    config: AppConfig,
+    client: FunPayClient,
+    scheduler: AutoBumpScheduler,
+    hero_sms: HeroSmsClient | None,
+    order_mgr: OrderManager,
+    auto_verifier: AutoVerifier | None = None,
+) -> Router:
     router = Router()
     authorized = _load_authorized_users(config)
     pending_inputs: dict[int, str] = {}
+    # Текущий активный заказ пользователя: user_id -> Order
+    user_active_order: dict[int, Order] = {}
 
     async def require_auth(message: Message) -> bool:
         if _is_allowed(message.from_user.id if message.from_user else 0, authorized, config):
@@ -62,7 +97,10 @@ def _build_router(config: AppConfig, client: FunPayClient, scheduler: AutoBumpSc
     async def status(message: Message) -> None:
         if not await require_auth(message):
             return
-        await message.answer(scheduler.status_text(), reply_markup=_main_keyboard())
+        text = scheduler.status_text()
+        if auto_verifier:
+            text += "\n\n" + auto_verifier.status_text()
+        await message.answer(text, reply_markup=_main_keyboard())
 
     @router.message(Command("catalog"))
     async def catalog(message: Message) -> None:
@@ -105,17 +143,339 @@ def _build_router(config: AppConfig, client: FunPayClient, scheduler: AutoBumpSc
         scheduler.set_enabled(False)
         await message.answer("Авто-поднятие выключено в текущем запуске.", reply_markup=_main_keyboard())
 
+    @router.message(Command("verify_on"))
+    async def verify_on(message: Message) -> None:
+        if not await require_auth(message):
+            return
+        if not auto_verifier:
+            await message.answer("Авто-верификация не настроена. Проверь hero_sms.api_key и funpay.golden_key.")
+            return
+        auto_verifier.set_enabled(True)
+        await message.answer("Авто-верификация включена. Заказы будут обрабатываться автоматически.", reply_markup=_main_keyboard())
+
+    @router.message(Command("verify_off"))
+    async def verify_off(message: Message) -> None:
+        if not await require_auth(message):
+            return
+        if not auto_verifier:
+            await message.answer("Авто-верификация не настроена.")
+            return
+        auto_verifier.set_enabled(False)
+        await message.answer("Авто-верификация выключена. Заказы нужно обрабатывать вручную.", reply_markup=_main_keyboard())
+
+    @router.message(Command("verify_status"))
+    async def verify_status(message: Message) -> None:
+        if not await require_auth(message):
+            return
+        if not auto_verifier:
+            await message.answer("Авто-верификация не настроена. Нужен hero_sms.api_key и funpay.golden_key.")
+            return
+        text = auto_verifier.status_text()
+        active = order_mgr.active_orders
+        if active:
+            text += "\n\nДетали активных заказов:"
+            for o in active:
+                text += f"\n  {o} | Код: {o.sms_code or '—'} | Номер: +{o.hero_number or '—'}"
+        await message.answer(text, reply_markup=_main_keyboard())
+
     @router.message(Command("settings"))
     async def settings(message: Message) -> None:
         if not await require_auth(message):
             return
-        await message.answer(_settings_text(config, client), reply_markup=_settings_keyboard())
+        await message.answer(_settings_text(config, client, hero_sms, auto_verifier), reply_markup=_settings_keyboard())
+
+    # ── Флоу заказа ───────────────────────────────────────
+
+    @router.message(Command("new_order"))
+    async def new_order(message: Message) -> None:
+        if not await require_auth(message):
+            return
+        if not hero_sms:
+            await message.answer("Hero SMS не настроен: укажи hero_sms.api_key в настройках.")
+            return
+        user_id = message.from_user.id if message.from_user else 0
+        active = order_mgr.active_orders_for_user(user_id)
+        if active:
+            await message.answer(
+                f"У тебя уже есть активный заказ: {active[0]}\nЗаверши или отмени его сначала.",
+                reply_markup=_order_keyboard(active[0].id),
+            )
+            return
+        await message.answer(
+            "Клиент купил товар. Выбери страну для верификации:",
+            reply_markup=_country_keyboard(),
+        )
+
+    @router.message(Command("orders"))
+    async def list_orders(message: Message) -> None:
+        if not await require_auth(message):
+            return
+        active = order_mgr.active_orders
+        if not active:
+            await message.answer("Нет активных заказов.", reply_markup=_main_keyboard())
+            return
+        lines = ["Активные заказы:"]
+        for o in active:
+            lines.append(f"  {o} | Код: {o.sms_code or '—'} | Номер: +{o.hero_number or '—'}")
+        await message.answer("\n".join(lines), reply_markup=_main_keyboard())
+
+    @router.message(Command("hero_balance"))
+    async def hero_balance(message: Message) -> None:
+        if not await require_auth(message):
+            return
+        if not hero_sms:
+            await message.answer("Hero SMS не настроен.")
+            return
+        try:
+            balance = await hero_sms.get_balance()
+        except HeroSmsError as exc:
+            await message.answer(f"Ошибка: {exc}")
+            return
+        await message.answer(f"Баланс Hero SMS: {balance}", reply_markup=_main_keyboard())
+
+    # ── Выбор страны ───────────────────────────────────────
+
+    @router.callback_query(F.data == "new_order")
+    async def new_order_callback(callback: CallbackQuery) -> None:
+        if not await require_auth_callback(callback):
+            return
+        if not hero_sms:
+            await callback.message.answer("Hero SMS не настроен.")
+            await callback.answer()
+            return
+        user_id = callback.from_user.id if callback.from_user else 0
+        active = order_mgr.active_orders_for_user(user_id)
+        if active:
+            await callback.message.answer(
+                f"Уже есть активный заказ: {active[0]}",
+                reply_markup=_order_keyboard(active[0].id),
+            )
+            await callback.answer()
+            return
+        await callback.message.answer("Выбери страну для верификации:", reply_markup=_country_keyboard())
+        await callback.answer()
+
+    @router.callback_query(F.data.startswith("order_country:"))
+    async def select_country_callback(callback: CallbackQuery) -> None:
+        if not await require_auth_callback(callback):
+            return
+        user_id = callback.from_user.id if callback.from_user else 0
+        country_id = int(callback.data.split(":", 1)[1])
+        country_name = config.orders.countries.get(country_id, f"Страна {country_id}")
+
+        result = order_mgr.create_order(user_id, country_id, country_name)
+        if isinstance(result, str):
+            await callback.message.answer(f"Нельзя создать заказ: {result}")
+            await callback.answer()
+            return
+
+        order = result
+        user_active_order[user_id] = order
+        order_mgr.update_state(order.id, OrderState.WAITING_AUTH)
+
+        await callback.message.answer(
+            f"Заказ #{order.id} создан ({country_name}).\n\n"
+            "Шаг 1: Попроси клиента открыть Claude.ai и начать авторизацию.\n"
+            "Шаг 2: Когда клиент дойдёт до этапа верификации номера — нажми кнопку ниже.",
+            reply_markup=_order_keyboard(order.id),
+        )
+        await callback.answer()
+
+    # ── Клиент дошёл до верификации → получить номер ──────
+
+    @router.callback_query(F.data.startswith("order_get_number:"))
+    async def order_get_number_callback(callback: CallbackQuery) -> None:
+        if not await require_auth_callback(callback):
+            return
+        if not hero_sms:
+            await callback.message.answer("Hero SMS не настроен.")
+            await callback.answer()
+            return
+
+        order_id = int(callback.data.split(":", 1)[1])
+        order = order_mgr.get_order(order_id)
+        if not order or not order.is_active:
+            await callback.message.answer("Заказ не найден или уже завершён.")
+            await callback.answer()
+            return
+
+        # Защита от абуза
+        rate_err = order_mgr.abuse.check_hero_rate()
+        if rate_err:
+            await callback.message.answer(rate_err)
+            await callback.answer()
+            return
+        order_mgr.abuse.record_hero_request()
+
+        await callback.message.answer("Получаю номер...")
+        try:
+            number = await hero_sms.get_number(
+                config.hero_sms.default_service,
+                order.country_id,
+                config.hero_sms.max_price,
+            )
+        except HeroSmsError as exc:
+            await callback.message.answer(f"Ошибка получения номера: {exc}")
+            await callback.answer()
+            return
+
+        order_mgr.set_hero_number(order.id, number.id, number.number)
+        # Сообщаем Hero SMS что готовы принять код
+        try:
+            await hero_sms.set_status(number.id, 1)  # STATUS_READY
+        except HeroSmsError:
+            pass
+
+        # Запускаем фоновое ожидание кода
+        order_mgr.start_code_wait(
+            order.id,
+            hero_sms,
+            poll_interval=config.hero_sms.poll_interval,
+            timeout=config.hero_sms.wait_timeout,
+        )
+
+        await callback.message.answer(
+            f"Номер получен: +{number.number}\n"
+            f"Страна: {order.country_name}\n\n"
+            f"Отправь этот номер клиенту в чат FunPay.\n"
+            f"Код придёт автоматически — бот сразу его пришлёт.",
+            reply_markup=_order_keyboard(order.id),
+        )
+        await callback.answer()
+
+    # ── Проверить код вручную ─────────────────────────────
+
+    @router.callback_query(F.data.startswith("order_check_code:"))
+    async def order_check_code_callback(callback: CallbackQuery) -> None:
+        if not await require_auth_callback(callback):
+            return
+        if not hero_sms:
+            await callback.message.answer("Hero SMS не настроен.")
+            await callback.answer()
+            return
+
+        order_id = int(callback.data.split(":", 1)[1])
+        order = order_mgr.get_order(order_id)
+        if not order or not order.is_active:
+            await callback.message.answer("Заказ не найден.")
+            await callback.answer()
+            return
+
+        if order.state == OrderState.CODE_RECEIVED or order.sms_code:
+            await callback.message.answer(
+                f"Код уже получен: {order.sms_code}\n"
+                f"Номер: +{order.hero_number}\n\n"
+                f"Отправь код клиенту и подтверди заказ на FunPay.",
+                reply_markup=_order_keyboard(order.id),
+            )
+            await callback.answer()
+            return
+
+        if not order.hero_activation_id:
+            await callback.message.answer("Номер ещё не получен. Сначала нажми «Получить номер».")
+            await callback.answer()
+            return
+
+        try:
+            result = await hero_sms.get_status(order.hero_activation_id)
+        except HeroSmsError as exc:
+            await callback.message.answer(f"Ошибка: {exc}")
+            await callback.answer()
+            return
+
+        if isinstance(result, SmsCode):
+            order_mgr.set_sms_code(order.id, result.code, result.full_text)
+            try:
+                await hero_sms.finish(order.hero_activation_id)
+            except HeroSmsError:
+                pass
+            order_mgr.update_state(order.id, OrderState.WAITING_CONFIRM)
+            await callback.message.answer(
+                f"Код: {result.code}\nПолный текст: {result.full_text}\nНомер: +{order.hero_number}\n\n"
+                f"Отправь код клиенту и подтверди заказ на FunPay!",
+                reply_markup=_order_keyboard(order.id),
+            )
+        else:
+            status_map = {"waiting": "Ожидание SMS...", "wait_retry": "Ожидание повторного кода..."}
+            await callback.message.answer(
+                f"{status_map.get(str(result), f'Статус: {result}')}\nНомер: +{order.hero_number}",
+                reply_markup=_order_keyboard(order.id),
+            )
+        await callback.answer()
+
+    # ── Подтвердить заказ ──────────────────────────────────
+
+    @router.callback_query(F.data.startswith("order_confirm:"))
+    async def order_confirm_callback(callback: CallbackQuery) -> None:
+        if not await require_auth_callback(callback):
+            return
+        order_id = int(callback.data.split(":", 1)[1])
+        order = order_mgr.get_order(order_id)
+        if not order:
+            await callback.message.answer("Заказ не найден.")
+            await callback.answer()
+            return
+        order_mgr.update_state(order.id, OrderState.COMPLETED)
+        user_id = callback.from_user.id if callback.from_user else 0
+        user_active_order.pop(user_id, None)
+        await callback.message.answer(
+            f"Заказ #{order.id} подтверждён и завершён.\n"
+            f"Код: {order.sms_code} | Номер: +{order.hero_number}",
+            reply_markup=_main_keyboard(),
+        )
+        await callback.answer("Готово")
+
+    # ── Отменить заказ ─────────────────────────────────────
+
+    @router.callback_query(F.data.startswith("order_cancel:"))
+    async def order_cancel_callback(callback: CallbackQuery) -> None:
+        if not await require_auth_callback(callback):
+            return
+        order_id = int(callback.data.split(":", 1)[1])
+        order = order_mgr.get_order(order_id)
+        if not order:
+            await callback.message.answer("Заказ не найден.")
+            await callback.answer()
+            return
+        # Отменяем активацию на Hero SMS если номер был получен
+        if order.hero_activation_id and hero_sms:
+            try:
+                await hero_sms.cancel(order.hero_activation_id)
+            except HeroSmsError:
+                pass
+        order_mgr.update_state(order.id, OrderState.CANCELLED)
+        user_id = callback.from_user.id if callback.from_user else 0
+        user_active_order.pop(user_id, None)
+        await callback.message.answer(f"Заказ #{order.id} отменён.", reply_markup=_main_keyboard())
+        await callback.answer()
+
+    # ── Баланс Hero SMS ────────────────────────────────────
+
+    @router.callback_query(F.data == "hero_balance")
+    async def hero_balance_callback(callback: CallbackQuery) -> None:
+        if not await require_auth_callback(callback):
+            return
+        if not hero_sms:
+            await callback.message.answer("Hero SMS не настроен.")
+            await callback.answer()
+            return
+        try:
+            balance = await hero_sms.get_balance()
+        except HeroSmsError as exc:
+            await callback.message.answer(f"Ошибка: {exc}")
+            await callback.answer()
+            return
+        await callback.message.answer(f"Баланс Hero SMS: {balance}", reply_markup=_main_keyboard())
+        await callback.answer()
 
     @router.callback_query(F.data == "status")
     async def status_callback(callback: CallbackQuery) -> None:
         if not await require_auth_callback(callback):
             return
-        await callback.message.answer(scheduler.status_text(), reply_markup=_main_keyboard())
+        text = scheduler.status_text()
+        if auto_verifier:
+            text += "\n\n" + auto_verifier.status_text()
+        await callback.message.answer(text, reply_markup=_main_keyboard())
         await callback.answer()
 
     @router.callback_query(F.data == "catalog")
@@ -184,11 +544,35 @@ def _build_router(config: AppConfig, client: FunPayClient, scheduler: AutoBumpSc
         await callback.message.answer("Авто-поднятие выключено в текущем запуске.", reply_markup=_main_keyboard())
         await callback.answer()
 
+    @router.callback_query(F.data == "verify_on")
+    async def verify_on_callback(callback: CallbackQuery) -> None:
+        if not await require_auth_callback(callback):
+            return
+        if not auto_verifier:
+            await callback.message.answer("Авто-верификация не настроена. Нужен hero_sms.api_key и funpay.golden_key.")
+            await callback.answer()
+            return
+        auto_verifier.set_enabled(True)
+        await callback.message.answer("Авто-верификация включена. Заказы обрабатываются автоматически.", reply_markup=_main_keyboard())
+        await callback.answer()
+
+    @router.callback_query(F.data == "verify_off")
+    async def verify_off_callback(callback: CallbackQuery) -> None:
+        if not await require_auth_callback(callback):
+            return
+        if not auto_verifier:
+            await callback.message.answer("Авто-верификация не настроена.")
+            await callback.answer()
+            return
+        auto_verifier.set_enabled(False)
+        await callback.message.answer("Авто-верификация выключена.", reply_markup=_main_keyboard())
+        await callback.answer()
+
     @router.callback_query(F.data == "settings")
     async def settings_callback(callback: CallbackQuery) -> None:
         if not await require_auth_callback(callback):
             return
-        await callback.message.answer(_settings_text(config, client), reply_markup=_settings_keyboard())
+        await callback.message.answer(_settings_text(config, client, hero_sms, auto_verifier), reply_markup=_settings_keyboard())
         await callback.answer()
 
     @router.callback_query(F.data.startswith("set:"))
@@ -301,6 +685,11 @@ def _main_keyboard() -> InlineKeyboardMarkup:
                 InlineKeyboardButton(text="Авто OFF", callback_data="autobump_off"),
             ],
             [
+                InlineKeyboardButton(text="Верификация ON", callback_data="verify_on"),
+                InlineKeyboardButton(text="Верификация OFF", callback_data="verify_off"),
+            ],
+            [
+                InlineKeyboardButton(text="Hero SMS", callback_data="hero_menu"),
                 InlineKeyboardButton(text="Настройки", callback_data="settings"),
             ],
         ]
@@ -327,8 +716,12 @@ def _settings_keyboard() -> InlineKeyboardMarkup:
                 InlineKeyboardButton(text="Интервал", callback_data="set:auto_bump_interval"),
             ],
             [
-                InlineKeyboardButton(text="Dry-run ON/OFF", callback_data="toggle:dry_run"),
-                InlineKeyboardButton(text="Real writes ON/OFF", callback_data="toggle:marketplace_writes"),
+                InlineKeyboardButton(text="Hero SMS api_key", callback_data="set:hero_sms_api_key"),
+                InlineKeyboardButton(text="Hero SMS сервис", callback_data="set:hero_sms_service"),
+            ],
+            [
+                InlineKeyboardButton(text="Hero SMS страна", callback_data="set:hero_sms_country"),
+                InlineKeyboardButton(text="Hero SMS proxy", callback_data="set:hero_sms_proxy"),
             ],
             [
                 InlineKeyboardButton(text="Назад", callback_data="cancel"),
@@ -354,6 +747,60 @@ def _cancel_keyboard() -> InlineKeyboardMarkup:
     )
 
 
+def _hero_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="Баланс", callback_data="hero_balance"),
+                InlineKeyboardButton(text="Новый заказ", callback_data="new_order"),
+            ],
+            [
+                InlineKeyboardButton(text="Мои заказы", callback_data="status"),
+                InlineKeyboardButton(text="Назад", callback_data="cancel"),
+            ],
+        ]
+    )
+
+
+def _country_keyboard() -> InlineKeyboardMarkup:
+    buttons = []
+    for cid, name in config.orders.countries.items():
+        buttons.append([InlineKeyboardButton(text=name, callback_data=f"order_country:{cid}")])
+    buttons.append([InlineKeyboardButton(text="Отмена", callback_data="cancel")])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+def _order_keyboard(order_id: int) -> InlineKeyboardMarkup:
+    order = order_mgr.get_order(order_id)
+    if not order:
+        return _main_keyboard()
+
+    rows: list[list[InlineKeyboardButton]] = []
+
+    if order.state == OrderState.WAITING_AUTH:
+        rows.append([
+            InlineKeyboardButton(text="Клиент дошёл до верификации", callback_data=f"order_get_number:{order_id}"),
+        ])
+    elif order.state == OrderState.WAITING_VERIFICATION:
+        rows.append([
+            InlineKeyboardButton(text="Получить номер", callback_data=f"order_get_number:{order_id}"),
+        ])
+    elif order.state == OrderState.NUMBER_RECEIVED:
+        rows.append([
+            InlineKeyboardButton(text="Проверить код", callback_data=f"order_check_code:{order_id}"),
+        ])
+    elif order.state in (OrderState.CODE_RECEIVED, OrderState.WAITING_CONFIRM):
+        rows.append([
+            InlineKeyboardButton(text="Подтвердить заказ", callback_data=f"order_confirm:{order_id}"),
+        ])
+
+    rows.append([
+        InlineKeyboardButton(text="Отменить заказ", callback_data=f"order_cancel:{order_id}"),
+        InlineKeyboardButton(text="Назад", callback_data="cancel"),
+    ])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
 def _format_results(results: list[BumpResult]) -> str:
     lines = ["Результат поднятия:"]
     for result in results:
@@ -365,7 +812,7 @@ def _format_results(results: list[BumpResult]) -> str:
 def _format_publish_plan(items: list[PublishPlanItem]) -> str:
     lines = [
         "План публикации на FunPay:",
-        "Категория Claude Accounts: https://funpay.com/lots/3172/",
+        "Категория Claude.ai / верификация номера: https://funpay.com/lots/3172/",
         "Для создания предложений открой ссылку trade у каждого товара и вставь текст из /preview.",
         "",
     ]
@@ -389,8 +836,11 @@ async def _send_long_text(message: Message, text: str) -> None:
         await message.answer(text[start : start + max_len])
 
 
-def _settings_text(config: AppConfig, client: FunPayClient) -> str:
+def _settings_text(config: AppConfig, client: FunPayClient, hero_sms: HeroSmsClient | None, auto_verifier: AutoVerifier | None = None) -> str:
     token_note = "задан" if config.telegram.token else "пусто"
+    hero_key_note = _mask_secret(config.hero_sms.api_key) if config.hero_sms.api_key else "пусто"
+    hero_status = "подключен" if hero_sms else "не настроен"
+    verify_status = "включена" if auto_verifier and auto_verifier.is_enabled else "выключена" if auto_verifier else "не настроена"
     return "\n".join(
         [
             "Настройки:",
@@ -401,10 +851,15 @@ def _settings_text(config: AppConfig, client: FunPayClient) -> str:
             f"FunPay User-Agent: {config.funpay.user_agent or 'пусто'}",
             f"FunPay proxy: {_mask_secret(config.funpay.proxy) if config.funpay.proxy else 'пусто'}",
             f"Категории: {', '.join(config.funpay.category_ids) or 'пусто'}",
-            f"Dry-run: {'ON' if config.funpay.dry_run else 'OFF'}",
-            f"Real writes: {'ON' if config.funpay.marketplace_writes_enabled else 'OFF'}",
-            f"Можно реально отправлять запросы: {'да' if client.can_write else 'нет'}",
+            f"FunPay запросы: {'готовы' if client.can_write else 'нужен golden_key'}",
             f"Интервал поднятия: {config.auto_bump.interval_seconds} сек.",
+            "",
+            f"Hero SMS api_key: {hero_key_note}",
+            f"Hero SMS статус: {hero_status}",
+            f"Hero SMS сервис: {config.hero_sms.default_service}",
+            f"Hero SMS страна: {config.hero_sms.default_country}",
+            "",
+            f"Авто-верификация: {verify_status}",
             "",
             "TG token можно сохранить тут, но чтобы бот перешел на новый токен, нужен перезапуск.",
             "Для очистки поля отправь: -",
@@ -422,6 +877,10 @@ def _setting_prompt(setting_key: str) -> str:
         "telegram_password": "Отправь новый пароль для входа в Telegram-бота.",
         "telegram_admin_ids": "Отправь Telegram admin IDs через запятую или пробел.",
         "auto_bump_interval": "Отправь интервал автоподнятия в секундах. Минимум 600.",
+        "hero_sms_api_key": "Отправь API-ключ Hero SMS. Его можно взять в личном кабинете hero-sms.com.",
+        "hero_sms_service": "Отправь код сервиса Hero SMS. Например: cl (Claude.ai), tg (Telegram), wa (WhatsApp).",
+        "hero_sms_country": "Отправь ID страны Hero SMS. Например: 0 (Россия), 16 (UK), 43 (Германия).",
+        "hero_sms_proxy": "Отправь прокси для Hero SMS или '-' чтобы очистить.",
     }
     return prompts.get(setting_key, "Отправь новое значение.")
 
@@ -486,6 +945,27 @@ def _apply_setting(
         scheduler.next_run_at = None
         return "Интервал автоподнятия сохранен."
 
+    if setting_key == "hero_sms_api_key":
+        _save_config_value(("hero_sms", "api_key"), value)
+        config.hero_sms.api_key = value
+        return "Hero SMS api_key сохранен. Перезапусти бота для применения."
+
+    if setting_key == "hero_sms_service":
+        _save_config_value(("hero_sms", "default_service"), value)
+        config.hero_sms.default_service = value
+        return f"Hero SMS сервис сохранен: {value}"
+
+    if setting_key == "hero_sms_country":
+        country_id = int(text)
+        _save_config_value(("hero_sms", "default_country"), country_id)
+        config.hero_sms.default_country = country_id
+        return f"Hero SMS страна сохранена: {country_id}"
+
+    if setting_key == "hero_sms_proxy":
+        _save_config_value(("hero_sms", "proxy"), value)
+        config.hero_sms.proxy = value
+        return "Hero SMS proxy сохранен. Перезапусти бота для применения."
+
     raise ValueError("Неизвестная настройка.")
 
 
@@ -495,23 +975,7 @@ def _toggle_setting(
     client: FunPayClient,
     scheduler: AutoBumpScheduler,
 ) -> str:
-    if setting_key == "dry_run":
-        value = not config.funpay.dry_run
-        _save_config_value(("funpay", "dry_run"), value)
-        config.funpay.dry_run = value
-        return f"Dry-run теперь {'ON' if value else 'OFF'}."
-
-    if setting_key == "marketplace_writes":
-        value = not config.funpay.marketplace_writes_enabled
-        _save_config_value(("funpay", "marketplace_writes_enabled"), value)
-        config.funpay.marketplace_writes_enabled = value
-        if value and config.funpay.dry_run:
-            return "Real writes включен, но dry-run тоже включен. Для реальных действий выключи dry-run."
-        if value and not config.funpay.golden_key:
-            return "Real writes включен, но golden_key пустой."
-        return f"Real writes теперь {'ON' if value else 'OFF'}."
-
-    raise ValueError("Неизвестный переключатель.")
+    raise ValueError("Переключатели режимов убраны: укажи golden_key и ID категории.")
 
 
 def _save_config_value(path: tuple[str, ...], value: Any) -> None:

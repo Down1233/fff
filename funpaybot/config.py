@@ -26,8 +26,6 @@ class FunPayConfig:
     user_agent: str
     proxy: str = ""
     requests_timeout: int = 30
-    dry_run: bool = True
-    marketplace_writes_enabled: bool = False
     category_ids: list[str] = field(default_factory=list)
     lot_urls: list[str] = field(default_factory=list)
 
@@ -60,6 +58,7 @@ class ServiceTier:
     description: str
     funpay_category_id: str = ""
     delivery_format: str = ""
+    hero_sms_country_id: int = 0
 
 
 @dataclass(slots=True)
@@ -72,11 +71,39 @@ class ServiceConfig:
 
 
 @dataclass(slots=True)
+class HeroSmsConfig:
+    api_key: str
+    default_country: int = 43
+    default_service: str = "cl"
+    max_price: float = 0
+    poll_interval: float = 5.0
+    wait_timeout: int = 300
+    proxy: str = ""
+
+
+@dataclass(slots=True)
+class OrderConfig:
+    max_concurrent: int = 3
+    cooldown_seconds: float = 30.0
+    max_per_day: int = 50
+    hero_rate_per_minute: int = 12
+    max_remind_count: int = 3
+    remind_interval_seconds: float = 120.0
+    confirm_timeout_seconds: float = 600.0
+    countries: dict[int, str] = field(default_factory=lambda: {
+        43: "🇩🇪 Германия",
+        16: "🇬🇧 Великобритания",
+    })
+
+
+@dataclass(slots=True)
 class AppConfig:
     telegram: TelegramConfig
     funpay: FunPayConfig
     auto_bump: AutoBumpConfig
     service: ServiceConfig
+    hero_sms: HeroSmsConfig = field(default_factory=lambda: HeroSmsConfig(api_key=""))
+    orders: OrderConfig = field(default_factory=OrderConfig)
 
 
 def _env(name: str, fallback: str = "") -> str:
@@ -110,6 +137,8 @@ def load_config(path: Path) -> AppConfig:
     auto_bump_raw = raw.get("auto_bump", {})
     quiet_raw = auto_bump_raw.get("quiet_hours", {})
     service_raw = raw.get("service", {})
+    hero_raw = raw.get("hero_sms", {})
+    orders_raw = raw.get("orders", {})
 
     tiers = [
         ServiceTier(
@@ -123,6 +152,7 @@ def load_config(path: Path) -> AppConfig:
             description=str(item.get("description", "")).strip(),
             funpay_category_id=str(item.get("funpay_category_id", "")).strip(),
             delivery_format=str(item.get("delivery_format", "")).strip(),
+            hero_sms_country_id=int(item.get("hero_sms_country_id", 0)),
         )
         for item in service_raw.get("tiers", [])
     ]
@@ -139,8 +169,6 @@ def load_config(path: Path) -> AppConfig:
             user_agent=str(funpay_raw.get("user_agent", "")).strip(),
             proxy=str(funpay_raw.get("proxy", "")).strip(),
             requests_timeout=int(funpay_raw.get("requests_timeout", 30)),
-            dry_run=bool(funpay_raw.get("dry_run", True)),
-            marketplace_writes_enabled=bool(funpay_raw.get("marketplace_writes_enabled", False)),
             category_ids=_as_str_list(funpay_raw.get("category_ids", [])),
             lot_urls=_as_str_list(funpay_raw.get("lot_urls", [])),
         ),
@@ -162,10 +190,52 @@ def load_config(path: Path) -> AppConfig:
             support_note=str(service_raw.get("support_note", "")).strip(),
             tiers=tiers,
         ),
+        hero_sms=HeroSmsConfig(
+            api_key=_env("HERO_SMS_API_KEY", str(hero_raw.get("api_key", ""))).strip(),
+            default_country=int(hero_raw.get("default_country", 43)),
+            default_service=str(hero_raw.get("default_service", "cl")).strip(),
+            max_price=float(hero_raw.get("max_price", 0)),
+            poll_interval=float(hero_raw.get("poll_interval", 5.0)),
+            wait_timeout=int(hero_raw.get("wait_timeout", 300)),
+            proxy=str(hero_raw.get("proxy", "")).strip(),
+        ),
+        orders=OrderConfig(
+            max_concurrent=int(orders_raw.get("max_concurrent", 3)),
+            cooldown_seconds=float(orders_raw.get("cooldown_seconds", 30.0)),
+            max_per_day=int(orders_raw.get("max_per_day", 50)),
+            hero_rate_per_minute=int(orders_raw.get("hero_rate_per_minute", 12)),
+            max_remind_count=int(orders_raw.get("max_remind_count", 3)),
+            remind_interval_seconds=float(orders_raw.get("remind_interval_seconds", 120.0)),
+            confirm_timeout_seconds=float(orders_raw.get("confirm_timeout_seconds", 600.0)),
+            countries=_parse_countries(orders_raw.get("countries", {})),
+        ),
     )
 
     _validate_config(config)
     return config
+
+
+def _parse_countries(raw: Any) -> dict[int, str]:
+    if not raw:
+        return {43: "🇩🇪 Германия", 16: "🇬🇧 Великобритания"}
+    result: dict[int, str] = {}
+    if isinstance(raw, dict):
+        for key, value in raw.items():
+            try:
+                result[int(key)] = str(value)
+            except (ValueError, TypeError):
+                continue
+    elif isinstance(raw, list):
+        for item in raw:
+            if isinstance(item, dict):
+                cid = item.get("id")
+                name = item.get("name", "")
+                if cid is not None and name:
+                    try:
+                        result[int(cid)] = str(name)
+                    except (ValueError, TypeError):
+                        continue
+    return result if result else {43: "🇩🇪 Германия", 16: "🇬🇧 Великобритания"}
 
 
 def _validate_config(config: AppConfig) -> None:

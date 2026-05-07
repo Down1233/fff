@@ -1,0 +1,200 @@
+{
+  "telegram": {
+    "token": "",
+    "password": "change_me",
+    "admin_ids": [],
+    "proxy": ""
+  },
+  "funpay": {
+    "golden_key": "",
+    "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
+    "proxy": "",
+    "requests_timeout": 30,
+    "category_ids": [
+      "3172"
+    ],
+    "lot_urls": []
+  },
+  "hero_sms": {
+    "api_key": "",
+    "default_country": 43,
+    "default_service": "cl",
+    "max_price": 0,
+    "poll_interval": 5.0,
+    "wait_timeout": 300,
+    "proxy": ""
+  },
+  "orders": {
+    "max_concurrent": 3,
+    "cooldown_seconds": 30,
+    "max_per_day": 50,
+    "hero_rate_per_minute": 12,
+    "max_remind_count": 3,
+    "remind_interval_seconds": 120,
+    "confirm_timeout_seconds": 600,
+    "countries": {
+      "43": "🇩🇪 Германия",
+      "16": "🇬🇧 Великобритания"
+    }
+  },
+  "auto_bump": {
+    "enabled": true,
+    "interval_seconds": 3900,
+    "jitter_seconds": 420,
+    "quiet_hours": {
+      "enabled": false,
+      "start": "03:00",
+      "end": "08:00",
+      "timezone": "Europe/Moscow"
+    }
+  },
+  "service": {
+    "name": "Claude.ai - верификация номера на аккаунте клиента",
+    "brand": "Rust Sale",
+    "delivery_note": "После оплаты покупатель работает в своем аккаунте Claude.ai и пишет в чат FunPay. Я принимаю SMS/звонок на свой номер и передаю код. Аккаунты, почты и подписки не выдаются.",
+    "support_note": "Помощь только с подтверждением номера на аккаунте покупателя в рамках выбранного товара.",
+    "tiers": [
+      {
+        "id": "de_basic_80",
+        "title": "🇩🇪 Claude.ai | Верификация номера Германия | SMS-код",
+        "price": 80,
+        "old_price": 120,
+        "quality": "DE Basic",
+        "badge": "Дешево",
+        "warranty": "На момент ввода кода",
+        "description": "Базовая услуга подтверждения немецкого номера для Claude.ai. Вы входите в свой аккаунт, доходите до запроса SMS, я принимаю код и отправляю его в чат FunPay. Аккаунты не продаю.",
+        "funpay_category_id": "3172",
+        "delivery_format": "1 SMS-код (Германия) для аккаунта покупателя",
+        "hero_sms_country_id": 43
+      },
+      {
+        "id": "de_fast_100",
+        "title": "🇩🇪 Claude.ai | Быстрая SMS-верификация Германия | Без аккаунтов",
+        "price": 100,
+        "old_price": 150,
+        "quality": "DE Fast",
+        "badge": "Быстро",
+        "warranty": "На момент получения кода",
+        "description": "Быстрая помощь с немецким номером для уже созданного аккаунта Claude.ai. Покупатель сам управляет аккаунтом, я только принимаю SMS и передаю код подтверждения.",
+        "funpay_category_id": "3172",
+        "delivery_format": "быстрая передача SMS-кода (Германия) в чат FunPay",
+        "hero_sms_country_id": 43
+      },
+      {
+        "id": "de_retry_120",
+        "title": "🇩🇪 Claude.ai | SMS-активация Германия | 1 повтор кода",
+        "price": 120,
+        "old_price": 170,
+        "quality": "DE Retry",
+        "badge": "С повтором",
+        "warranty": "1 повтор, если код не пришел",
+        "description": "Немецкий номер для верификации Claude.ai с запасом по одной повторной отправке. Работаю только с вашим аккаунтом: принимаю код на номер и передаю его в чат.",
+        "funpay_category_id": "3172",
+        "delivery_format": "SMS-код (Германия) плюс 1 повтор при необходимости",
+        "hero_sms_country_id": 43
+      },
+      {
+        "id": "de_priority_150",
+        "title": "🇩🇪 Claude.ai | Приоритетная верификация Германия | Быстрый слот",
+        "price": 150,
+        "old_price": 220,
+        "quality": "DE Priority",
+        "badge": "Приоритет",
+        "warranty": "На момент активации",
+        "description": "Приоритетный слот для подтверждения немецкого номера Claude.ai без ожидания общей очереди. Вы работаете в своем аккаунте, я быстро принимаю SMS/код и отправляю его в FunPay чат.",
+        "funpay_category_id": "3172",
+        "delivery_format": "приоритетный прием и передача кода (Германия)",
+        "hero_sms_country_id": 43
+      },
+      {
+        "id": "de_vip_200",
+        "title": "🇩🇪 Claude.ai | VIP верификация Германия | Максимальная поддержка",
+        "price": 200,
+        "old_price": 300,
+        "quality": "DE VIP",
+        "badge": "VIP",
+        "warranty": "До завершения подтверждения номера",
+        "description": "Максимальный пакет поддержки для подтверждения немецкого номера Claude.ai на аккаунте клиента. Быстрый ответ, сопровождение по шагам и передача кода сразу после получения.",
+        "funpay_category_id": "3172",
+        "delivery_format": "VIP-сопровождение верификации номера (Германия)",
+        "hero_sms_country_id": 43
+      },
+      {
+        "id": "uk_basic_90",
+        "title": "🇬🇧 Claude.ai | Верификация номера Великобритания | SMS-код",
+        "price": 90,
+        "old_price": 130,
+        "quality": "UK Basic",
+        "badge": "Дешево",
+        "warranty": "На момент ввода кода",
+        "description": "Базовая услуга подтверждения британского номера для Claude.ai. Вы входите в свой аккаунт, доходите до запроса SMS, я принимаю код и отправляю его в чат FunPay. Аккаунты не продаю.",
+        "funpay_category_id": "3172",
+        "delivery_format": "1 SMS-код (Великобритания) для аккаунта покупателя",
+        "hero_sms_country_id": 16
+      },
+      {
+        "id": "uk_fast_110",
+        "title": "🇬🇧 Claude.ai | Быстрая SMS-верификация Великобритания | Без аккаунтов",
+        "price": 110,
+        "old_price": 160,
+        "quality": "UK Fast",
+        "badge": "Быстро",
+        "warranty": "На момент получения кода",
+        "description": "Быстрая помощь с британским номером для уже созданного аккаунта Claude.ai. Покупатель сам управляет аккаунтом, я только принимаю SMS и передаю код подтверждения.",
+        "funpay_category_id": "3172",
+        "delivery_format": "быстрая передача SMS-кода (Великобритания) в чат FunPay",
+        "hero_sms_country_id": 16
+      },
+      {
+        "id": "uk_retry_130",
+        "title": "🇬🇧 Claude.ai | SMS-активация Великобритания | 1 повтор кода",
+        "price": 130,
+        "old_price": 190,
+        "quality": "UK Retry",
+        "badge": "С повтором",
+        "warranty": "1 повтор, если код не пришел",
+        "description": "Британский номер для верификации Claude.ai с запасом по одной повторной отправке. Работаю только с вашим аккаунтом: принимаю код на номер и передаю его в чат.",
+        "funpay_category_id": "3172",
+        "delivery_format": "SMS-код (Великобритания) плюс 1 повтор при необходимости",
+        "hero_sms_country_id": 16
+      },
+      {
+        "id": "uk_priority_170",
+        "title": "🇬🇧 Claude.ai | Приоритетная верификация Великобритания | Быстрый слот",
+        "price": 170,
+        "old_price": 240,
+        "quality": "UK Priority",
+        "badge": "Приоритет",
+        "warranty": "На момент активации",
+        "description": "Приоритетный слот для подтверждения британского номера Claude.ai без ожидания общей очереди. Вы работаете в своем аккаунте, я быстро принимаю SMS/код и отправляю его в FunPay чат.",
+        "funpay_category_id": "3172",
+        "delivery_format": "приоритетный прием и передача кода (Великобритания)",
+        "hero_sms_country_id": 16
+      },
+      {
+        "id": "uk_vip_190",
+        "title": "🇬🇧 Claude.ai | VIP верификация Великобритания | Максимальная поддержка",
+        "price": 190,
+        "old_price": 270,
+        "quality": "UK VIP",
+        "badge": "VIP",
+        "warranty": "До завершения подтверждения номера",
+        "description": "Максимальный пакет поддержки для подтверждения британского номера Claude.ai на аккаунте клиента. Быстрый ответ, сопровождение по шагам и передача кода сразу после получения.",
+        "funpay_category_id": "3172",
+        "delivery_format": "VIP-сопровождение верификации номера (Великобритания)",
+        "hero_sms_country_id": 16
+      }
+    ],
+    "market_research": {
+      "source_url": "https://funpay.com/lots/3172/",
+      "category_id": "3172",
+      "category_title_ru": "Claude.ai",
+      "target_query_ru": "верификация номера / SMS активация Claude.ai",
+      "price_notes": [
+        "Витрина выстроена только под подтверждение номера на аккаунте покупателя.",
+        "Линейка цен: 80-200 ₽, чтобы закрыть дешевые, средние и приоритетные варианты.",
+        "Дорогие позиции отличаются скоростью, повторами и сопровождением, а не продажей аккаунтов."
+      ]
+    }
+  }
+}

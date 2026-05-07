@@ -1,95 +1,74 @@
 # План публикации на FunPay
 
-Категория Claude Accounts: https://funpay.com/lots/3172/
+Категория Claude.ai / верификация номера: https://funpay.com/lots/3172/
 Создание предложений: https://funpay.com/lots/3172/trade
 
-## 1. ⬛ Claude.ai | ГОТОВЫЙ АККАУНТ | Outlook | Full Access
+## 1. 📱 Claude.ai | Верификация номера | SMS-код на ваш аккаунт
 
-ID: budget_outlook
-Цена: 39 ₽
+ID: sms_start_80
+Цена: 80 ₽
 Категория: 3172
 Ссылка создания: https://funpay.com/lots/3172/trade
 
-## 2. 💎 Claude.ai | ЧИСТЫЙ ГОТОВЫЙ АККАУНТ | Быстрая выдача
+## 2. ⚡ Claude.ai | Быстрая SMS-верификация номера | Без аккаунтов
 
-ID: ready_clean
-Цена: 69 ₽
+ID: sms_fast_90
+Цена: 90 ₽
 Категория: 3172
 Ссылка создания: https://funpay.com/lots/3172/trade
 
-## 3. 🇺🇸 Claude.ai | USA REGION | Full Access | Auto выдача
+## 3. ✅ Claude.ai | Чистая верификация номера | На аккаунт клиента
 
-ID: region_usa
-Цена: 89 ₽
+ID: sms_clean_100
+Цена: 100 ₽
 Категория: 3172
 Ссылка создания: https://funpay.com/lots/3172/trade
 
-## 4. 🇪🇺 Claude.ai | EUROPE REGION | Poland/Germany | Full Access
+## 4. 🔁 Claude.ai | SMS-активация номера | 1 повтор кода
 
-ID: region_eu
-Цена: 89 ₽
+ID: sms_retry_110
+Цена: 110 ₽
 Категория: 3172
 Ссылка создания: https://funpay.com/lots/3172/trade
 
-## 5. 📩 Claude.ai | РЕГИСТРАЦИЯ НА ВАШУ ПОЧТУ | Быстро
+## 5. ☎️ Claude.ai | Номер для подтверждения | SMS/звонок если доступно
 
-ID: your_email_start
-Цена: 129 ₽
+ID: voice_or_sms_120
+Цена: 120 ₽
 Категория: 3172
 Ссылка создания: https://funpay.com/lots/3172/trade
 
-## 6. 📱 Claude.ai | SMS АКТИВАЦИЯ / НОМЕР | Для регистрации
+## 6. 🧭 Claude.ai | Верификация номера с сопровождением | Ваш аккаунт
 
-ID: sms_activation
-Цена: 79 ₽
+ID: guided_130
+Цена: 130 ₽
 Категория: 3172
 Ссылка создания: https://funpay.com/lots/3172/trade
 
-## 7. 🧠 Claude Code | Проверенный доступ | Для кода и текста
+## 7. 🚀 Claude.ai | Приоритетная верификация номера | Быстрый слот
 
-ID: code_ready
-Цена: 149 ₽
+ID: priority_150
+Цена: 150 ₽
 Категория: 3172
 Ссылка создания: https://funpay.com/lots/3172/trade
 
-## 8. ⚡ Claude.ai | Помощь с регистрацией | Под ключ
+## 8. 🛡️ Claude.ai | Верификация номера | До 2 попыток кода
 
-ID: support_pack
-Цена: 199 ₽
+ID: double_attempt_170
+Цена: 170 ₽
 Категория: 3172
 Ссылка создания: https://funpay.com/lots/3172/trade
 
-## 9. 🤖 Multi AI Hub | Claude + ChatGPT + Gemini + Grok | Доступ
+## 9. 💬 Claude.ai | Номер + полное сопровождение в чате | Ваш аккаунт
 
-ID: multi_ai_access
-Цена: 49 ₽
+ID: full_support_190
+Цена: 190 ₽
 Категория: 3172
 Ссылка создания: https://funpay.com/lots/3172/trade
 
-## 10. 🚀 Claude Pro | 1 месяц | Готовый аккаунт с подпиской
+## 10. 👑 Claude.ai | VIP верификация номера | Максимальная поддержка
 
-ID: pro_1m_account
-Цена: 1999 ₽
-Категория: 3172
-Ссылка создания: https://funpay.com/lots/3172/trade
-
-## 11. 🚀 Claude Pro | 1 месяц | На ваш аккаунт / вашу почту
-
-ID: pro_1m_your_account
-Цена: 2199 ₽
-Категория: 3172
-Ссылка создания: https://funpay.com/lots/3172/trade
-
-## 12. 💠 Claude Max 5x | 1 месяц | Премиум доступ
-
-ID: max_5x
-Цена: 11990 ₽
-Категория: 3172
-Ссылка создания: https://funpay.com/lots/3172/trade
-
-## 13. 👑 Claude Max 20x | 1 месяц | Максимальный пакет
-
-ID: max_20x
-Цена: 21990 ₽
+ID: premium_200
+Цена: 200 ₽
 Категория: 3172
 Ссылка создания: https://funpay.com/lots/3172/trade

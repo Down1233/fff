@@ -20,7 +20,7 @@ def render_catalog(config: AppConfig) -> str:
             [
                 f"{index}. {tier.title}",
                 f"Цена: {tier.price} руб.{old_price}",
-                f"Качество: {tier.quality} | Метка: {tier.badge} | Гарантия: {tier.warranty}",
+                f"Вариант: {tier.quality} | Метка: {tier.badge} | Гарантия: {tier.warranty}",
                 f"Категория FunPay: {tier.funpay_category_id or ', '.join(config.funpay.category_ids) or 'не задана'}",
                 tier.description,
                 "",
@@ -36,14 +36,15 @@ def render_funpay_text(config: AppConfig, tier: ServiceTier) -> str:
         f"{tier.title}\n\n"
         f"Цена: {tier.price} руб.\n"
         f"{old_price}"
-        f"Качество: {tier.quality}\n"
+        f"Вариант: {tier.quality}\n"
         f"Метка: {tier.badge}\n"
         f"Гарантия: {tier.warranty}\n\n"
         f"{tier.description}\n\n"
         "Что получает покупатель:\n"
-        f"- Формат выдачи: {tier.delivery_format or 'данные/инструкция в чат FunPay'}.\n"
-        "- Проверку перед выдачей, если это применимо к выбранному товару.\n"
-        "- Короткую инструкцию по входу или активации.\n"
+        f"- Формат услуги: {tier.delivery_format or 'верификация номера в чате FunPay'}.\n"
+        "- Прием SMS/звонка на номер исполнителя для подтверждения Claude.ai.\n"
+        "- Передачу кода в чат FunPay сразу после получения.\n"
+        "- Работа только на аккаунте покупателя: аккаунты, почты и подписки не выдаются.\n"
         "- Помощь в рамках указанной гарантии.\n\n"
         f"Выдача: {config.service.delivery_note}\n"
         f"Поддержка: {config.service.support_note}\n\n"
