@@ -11,7 +11,7 @@ from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMar
 from .auto_verify import AutoVerifier
 from .catalog import render_all_funpay_texts, render_catalog, write_listing_preview
 from .config import AppConfig
-from .funpay_client import BumpResult, FunPayClient, PublishPlanItem
+from .funpay_client import BumpResult, CreateOfferResult, FunPayClient, PublishPlanItem
 from .hero_sms import HeroSmsClient, HeroSmsError, NumberInfo, SmsCode
 from .orders import AbuseConfig, Order, OrderManager, OrderState
 from .scheduler import AutoBumpScheduler
@@ -232,6 +232,22 @@ def _build_router(
             await message.answer(f"Ошибка: {exc}")
             return
         await message.answer(f"Баланс Hero SMS: {balance}", reply_markup=_main_keyboard())
+
+    @router.message(Command("publish_all"))
+    async def publish_all_cmd(message: Message) -> None:
+        if not await require_auth(message):
+            return
+        if not client.can_write:
+            await message.answer("Нужен funpay.golden_key для публикации предложений.")
+            return
+        tier_lines = [f"{i+1}. {t.title} — {t.price} ₽" for i, t in enumerate(config.service.tiers)]
+        await message.answer(
+            "Создать все предложения на FunPay автоматически?\n\n"
+            + "\n".join(tier_lines)
+            + f"\n\nКатегория: {', '.join(config.funpay.category_ids) or 'не задана'}\n"
+            f"Всего: {len(config.service.tiers)} предложений",
+            reply_markup=_confirm_keyboard("confirm_publish"),
+        )
 
     # ── Выбор страны ───────────────────────────────────────
 
@@ -499,6 +515,38 @@ def _build_router(
         await _send_long_text(callback.message, _format_publish_plan(client.build_publish_plan(config)))
         await callback.answer()
 
+    @router.callback_query(F.data == "publish_all")
+    async def publish_all_callback(callback: CallbackQuery) -> None:
+        if not await require_auth_callback(callback):
+            return
+        if not client.can_write:
+            await callback.message.answer("Нужен funpay.golden_key для публикации.")
+            await callback.answer()
+            return
+        tier_lines = [f"{i+1}. {t.title} — {t.price} ₽" for i, t in enumerate(config.service.tiers)]
+        await callback.message.answer(
+            "Создать все предложения на FunPay автоматически?\n\n"
+            + "\n".join(tier_lines)
+            + f"\n\nКатегория: {', '.join(config.funpay.category_ids) or 'не задана'}\n"
+            f"Всего: {len(config.service.tiers)} предложений",
+            reply_markup=_confirm_keyboard("confirm_publish"),
+        )
+        await callback.answer()
+
+    @router.callback_query(F.data == "confirm_publish")
+    async def confirm_publish_callback(callback: CallbackQuery) -> None:
+        if not await require_auth_callback(callback):
+            return
+        await callback.message.answer("Создаю предложения на FunPay... Это может занять около минуты.")
+        try:
+            results = await client.create_all_offers(config)
+        except Exception as exc:
+            await callback.message.answer(f"Ошибка при публикации: {exc}", reply_markup=_main_keyboard())
+            await callback.answer()
+            return
+        await callback.message.answer(_format_offer_results(results), reply_markup=_main_keyboard())
+        await callback.answer("Готово")
+
     @router.callback_query(F.data == "check_session")
     async def check_session_callback(callback: CallbackQuery) -> None:
         if not await require_auth_callback(callback):
@@ -676,6 +724,7 @@ def _main_keyboard() -> InlineKeyboardMarkup:
             ],
             [
                 InlineKeyboardButton(text="План публикации", callback_data="publish_plan"),
+                InlineKeyboardButton(text="Опубликовать все", callback_data="publish_all"),
             ],
             [
                 InlineKeyboardButton(text="Поднять сейчас", callback_data="bump_now"),
@@ -806,6 +855,16 @@ def _format_results(results: list[BumpResult]) -> str:
     for result in results:
         marker = "OK" if result.ok else "ERR"
         lines.append(f"{marker} {result.category_id}: {result.message}")
+    return "\n".join(lines)
+
+
+def _format_offer_results(results: list[CreateOfferResult]) -> str:
+    lines = ["Результат публикации предложений:"]
+    for result in results:
+        marker = "OK" if result.ok else "ERR"
+        lines.append(f"{marker} {result.tier_id} ({result.category_id}): {result.message}")
+    ok_count = sum(1 for r in results if r.ok)
+    lines.append(f"\nУспешно: {ok_count}/{len(results)}")
     return "\n".join(lines)
 
 

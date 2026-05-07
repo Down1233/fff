@@ -183,10 +183,13 @@ class AutoVerifier:
         # Отправляем номер в чат FunPay
         country_flag = "🇩🇪" if country_id == 43 else "🇬🇧" if country_id == 16 else ""
         chat_msg = (
-            f"Здравствуйте! Номер для верификации Claude.ai ({country_flag} {country_name}):\n"
-            f"+{number.number}\n\n"
-            f"Введите этот номер на странице верификации Claude.ai. "
-            f"Код подтверждения придёт автоматически в этот чат в течение нескольких минут."
+            f"Здравствуйте! Пошаговая инструкция по верификации Claude.ai:\n\n"
+            f"1. Откройте Claude.ai в браузере и войдите в свой аккаунт\n"
+            f"2. Перейдите на страницу верификации номера телефона\n"
+            f"3. Введите номер: +{number.number} ({country_flag} {country_name})\n"
+            f"4. Нажмите «Отправить код»\n"
+            f"5. SMS-код придёт в этот чат автоматически в течение нескольких минут\n\n"
+            f"Не закрывайте страницу верификации, пока не получите код."
         )
         await self.funpay.send_chat_message(fp_order.order_id, chat_msg)
 
@@ -222,9 +225,11 @@ class AutoVerifier:
 
         # Отправляем код в чат FunPay
         code_msg = (
-            f"Ваш код подтверждения: {code.code}\n\n"
-            f"Введите этот код на странице верификации Claude.ai. "
-            f"После успешной верификации подтвердите получение заказа на FunPay."
+            f"Ваш SMS-код подтверждения: {code.code}\n\n"
+            f"6. Введите код {code.code} на странице верификации Claude.ai\n"
+            f"7. Дождитесь подтверждения на экране\n"
+            f"8. Подтвердите получение заказа на FunPay\n\n"
+            f"Если код не подошёл — напишите в этот чат, я отправлю повторный код."
         )
         sent = await self.funpay.send_chat_message(fp_order.order_id, code_msg)
 

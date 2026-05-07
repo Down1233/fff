@@ -35,6 +35,15 @@ class PublishPlanItem:
     description: str
 
 
+@dataclass(slots=True)
+class CreateOfferResult:
+    category_id: str
+    tier_id: str
+    ok: bool
+    message: str
+    raw: Any = None
+
+
 class FunPayClient:
     def __init__(self, config: FunPayConfig) -> None:
         self.config = config
@@ -424,3 +433,200 @@ class FunPayClient:
         except Exception as exc:
             log.warning("HTTP confirm failed: %s", exc)
             return False
+
+    # ── Создание предложений на FunPay ──────────────────────
+
+    async def create_offer(
+        self, category_id: str, tier_id: str, text: str, price: int,
+    ) -> CreateOfferResult:
+        if not self.config.golden_key:
+            return CreateOfferResult(
+                category_id=category_id, tier_id=tier_id,
+                ok=False, message="Не заполнен funpay.golden_key.",
+            )
+        return await asyncio.to_thread(
+            self._create_offer_sync, category_id, tier_id, text, price,
+        )
+
+    def _create_offer_sync(
+        self, category_id: str, tier_id: str, text: str, price: int,
+    ) -> CreateOfferResult:
+        api_result = self._try_funpay_api_create_offer(category_id, tier_id, text, price)
+        if api_result is not None:
+            return api_result
+        return self._try_http_create_offer(category_id, tier_id, text, price)
+
+    def _try_funpay_api_create_offer(
+        self, category_id: str, tier_id: str, text: str, price: int,
+    ) -> CreateOfferResult | None:
+        try:
+            from FunPayAPI import Account  # type: ignore
+        except Exception:
+            return None
+
+        try:
+            account = Account(self.config.golden_key)
+            if hasattr(account, "get"):
+                account.get()
+
+            for method_name in ("create_offer", "add_offer", "create_lot"):
+                method = getattr(account, method_name, None)
+                if method is None:
+                    continue
+                raw = method(category_id, text, price)
+                return CreateOfferResult(
+                    category_id=category_id, tier_id=tier_id, ok=True,
+                    message=f"FunPayAPI: предложение создано через {method_name}.",
+                    raw=raw,
+                )
+        except Exception as exc:
+            log.warning("FunPayAPI create offer failed: %s", exc)
+            return CreateOfferResult(
+                category_id=category_id, tier_id=tier_id, ok=False,
+                message=f"FunPayAPI ошибка: {exc}",
+            )
+        return None
+
+    def _try_http_create_offer(
+        self, category_id: str, tier_id: str, text: str, price: int,
+    ) -> CreateOfferResult:
+        import re as _re
+
+        trade_url = f"https://funpay.com/lots/{category_id}/trade"
+
+        # 1. Загружаем страницу trade, чтобы вытащить CSRF-токен и список серверов
+        try:
+            page = self.session.get(trade_url, timeout=self.config.requests_timeout)
+        except requests.RequestException as exc:
+            return CreateOfferResult(
+                category_id=category_id, tier_id=tier_id, ok=False,
+                message=f"Не удалось загрузить страницу trade: {exc}",
+            )
+
+        if page.status_code in {401, 403}:
+            return CreateOfferResult(
+                category_id=category_id, tier_id=tier_id, ok=False,
+                message="FunPay не принял сессию. Проверь golden_key.",
+            )
+
+        # CSRF-токен
+        csrf_token = ""
+        for pattern in (
+            r'name=["\']_token["\'][^>]*value=["\']([^"\']+)["\']',
+            r'value=["\']([^"\']+)["\'][^>]*name=["\']_token["\']',
+            r'name=["\']csrf[_-]?token["\'][^>]*value=["\']([^"\']+)["\']',
+        ):
+            m = _re.search(pattern, page.text)
+            if m:
+                csrf_token = m.group(1)
+                break
+
+        # Список серверов (subcategory) — берём первый
+        server_id = ""
+        server_match = _re.search(
+            r'<option[^>]*value=["\'](\d+)["\'][^>]*>', page.text,
+        )
+        if server_match:
+            server_id = server_match.group(1)
+
+        # 2. Пробуем создать предложение разными форматами payload
+        payloads: list[dict[str, Any]] = [
+            {
+                "node": category_id,
+                "text": text,
+                "price": str(price),
+                **({"server": server_id} if server_id else {}),
+            },
+            {
+                "category_id": category_id,
+                "description": text,
+                "price": str(price),
+                **({"server_id": server_id} if server_id else {}),
+            },
+            {
+                "offer[text]": text,
+                "offer[price]": str(price),
+                "offer[node]": category_id,
+                **({"offer[server]": server_id} if server_id else {}),
+            },
+        ]
+
+        for payload in payloads:
+            if csrf_token:
+                payload["_token"] = csrf_token
+
+        headers = {
+            "Referer": trade_url,
+            "X-Requested-With": "XMLHttpRequest",
+        }
+
+        last_error = ""
+        for payload in payloads:
+            try:
+                response = self.session.post(
+                    trade_url,
+                    data=payload,
+                    headers=headers,
+                    timeout=self.config.requests_timeout,
+                )
+            except requests.RequestException as exc:
+                last_error = str(exc)
+                continue
+
+            if response.status_code in {401, 403}:
+                return CreateOfferResult(
+                    category_id=category_id, tier_id=tier_id, ok=False,
+                    message="FunPay не принял сессию.",
+                )
+            if response.status_code == 429:
+                return CreateOfferResult(
+                    category_id=category_id, tier_id=tier_id, ok=False,
+                    message="FunPay ограничил частоту запросов.",
+                )
+            if response.status_code >= 500:
+                last_error = f"status={response.status_code}"
+                continue
+
+            try:
+                raw_json = response.json()
+            except ValueError:
+                raw_json = {"status_code": response.status_code, "text": response.text[:500]}
+
+            ok = response.status_code < 400 and not raw_json.get("error")
+            message = (
+                raw_json.get("msg") or raw_json.get("message")
+                or ("Предложение создано" if ok else "Неизвестная ошибка")
+            )
+            return CreateOfferResult(
+                category_id=category_id, tier_id=tier_id,
+                ok=ok, message=str(message), raw=raw_json,
+            )
+
+        return CreateOfferResult(
+            category_id=category_id, tier_id=tier_id, ok=False,
+            message=f"Не удалось создать предложение. Последняя ошибка: {last_error}",
+        )
+
+    async def create_all_offers(self, config) -> list[CreateOfferResult]:
+        from .catalog import render_funpay_text
+
+        results: list[CreateOfferResult] = []
+        default_category = (
+            config.funpay.category_ids[0] if config.funpay.category_ids else ""
+        )
+
+        for tier in config.service.tiers:
+            category_id = tier.funpay_category_id or default_category
+            if not category_id:
+                results.append(CreateOfferResult(
+                    category_id="-", tier_id=tier.id,
+                    ok=False, message="Нет категории для товара.",
+                ))
+                continue
+
+            text = render_funpay_text(config, tier)
+            result = await self.create_offer(category_id, tier.id, text, tier.price)
+            results.append(result)
+            await asyncio.sleep(3.0)
+
+        return results
